@@ -80,8 +80,26 @@ function broadcast(room: Room, payload: unknown, exceptId?: string) {
   }
 }
 
+function normalizeRoomCode(value: string): string {
+  return value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
+function isValidRoomCode(code: string): boolean {
+  return /^D\d{16,22}$/.test(code) || /^[A-Z0-9]{4,8}$/.test(code);
+}
+
+function getOrCreateRoom(code: string): Room {
+  const existing = rooms.get(code);
+  if (existing) {
+    return existing;
+  }
+  const created: Room = { createdAt: Date.now(), participants: new Map() };
+  rooms.set(code, created);
+  return created;
+}
+
 function getRoom(code: string): Room | undefined {
-  return rooms.get(code.toUpperCase());
+  return rooms.get(normalizeRoomCode(code));
 }
 
 function removeParticipant(code: string, participantId: string) {
@@ -125,12 +143,12 @@ app.post("/rooms", (req, res) => {
 });
 
 app.post("/rooms/:code/join", (req, res) => {
-  const code = req.params.code.toUpperCase();
-  const room = rooms.get(code);
-  if (!room) {
-    res.status(404).json({ error: "Sala não encontrada. Verifique o código." });
+  const code = normalizeRoomCode(req.params.code ?? "");
+  if (!isValidRoomCode(code)) {
+    res.status(400).json({ error: "Código inválido." });
     return;
   }
+  getOrCreateRoom(code);
   const displayName = sanitizeDisplayName(req.body?.displayName);
   const participantId = createParticipantId();
   res.json({
@@ -146,7 +164,7 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 
 wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "/ws", "http://localhost");
-  const code = (url.searchParams.get("code") ?? "").toUpperCase();
+  const code = normalizeRoomCode(url.searchParams.get("code") ?? "");
   const participantId = url.searchParams.get("participantId") ?? "";
   const displayName = sanitizeDisplayName(url.searchParams.get("name"));
   const room = rooms.get(code);
