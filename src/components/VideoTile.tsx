@@ -1,26 +1,24 @@
 import { useEffect, useRef } from "react";
-import type { Track } from "livekit-client";
 
 interface VideoTileProps {
-  track: Track;
+  stream: MediaStream;
   label: string;
   active?: boolean;
   expandable?: boolean;
   onSelect?: () => void;
 }
 
-export function VideoTile({ track, label, active, expandable, onSelect }: VideoTileProps) {
+export function VideoTile({ stream, label, active, expandable, onSelect }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     const element = videoRef.current;
     if (!element) return;
-
-    track.attach(element);
+    element.srcObject = stream;
     return () => {
-      track.detach(element);
+      element.srcObject = null;
     };
-  }, [track]);
+  }, [stream]);
 
   return (
     <button

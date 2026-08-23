@@ -10,28 +10,20 @@ Complemento de compartilhamento de tela para usar junto com o Discord. A voz e o
 4. Os outros abrem o Telinha, colam o código e entram.
 5. Qualquer pessoa pode clicar **Compartilhar tela** (ou usar `Ctrl+Shift+S`).
 
+O vídeo vai do PC de quem compartilha direto para os amigos (WebRTC). O servidor só troca o código da sala e o handshake.
+
 ## Pré-requisitos
 
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://rustup.rs/)
-- Conta free no [LiveKit Cloud](https://cloud.livekit.io)
 
 ## Configuração
 
-1. Copie as variáveis de ambiente:
-
 ```bash
-cp server/.env.example server/.env
 cp .env.example .env
 ```
 
-2. Preencha `server/.env` com suas credenciais LiveKit:
-
-```
-LIVEKIT_URL=wss://seu-projeto.livekit.cloud
-LIVEKIT_API_KEY=...
-LIVEKIT_API_SECRET=...
-```
+Para desenvolvimento local, `VITE_API_URL=http://localhost:3001`. No `.exe` que vai para os amigos, use a URL pública do servidor (`https://telinha-server.onrender.com`).
 
 ## Desenvolvimento
 

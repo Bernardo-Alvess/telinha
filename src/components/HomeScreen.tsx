@@ -1,19 +1,27 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { createRoom, joinRoom, type RoomSession } from "../api";
 
 const NAME_KEY = "telinha-display-name";
 
 interface HomeScreenProps {
   onJoin: (session: RoomSession) => void;
+  error?: string | null;
 }
 
-export function HomeScreen({ onJoin }: HomeScreenProps) {
+export function HomeScreen({ onJoin, error: incomingError }: HomeScreenProps) {
   const [displayName, setDisplayName] = useState(
     () => localStorage.getItem(NAME_KEY) ?? "",
   );
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(incomingError ?? null);
+
+  useEffect(() => {
+    if (incomingError) {
+      setError(incomingError);
+    }
+  }, [incomingError]);
 
   function persistName() {
     const name = displayName.trim() || "Amigo";
@@ -98,7 +106,27 @@ export function HomeScreen({ onJoin }: HomeScreenProps) {
       {error && <p className="error">{error}</p>}
 
       <footer className="hint">
-        Cole o código no chat do Discord para seus amigos entrarem.
+        Cole o código no Discord, ou use telinha://join/CODIGO. Se você
+        compilou o Vencord da source, o plugin pode ir para src/userplugins.
+        <button
+          type="button"
+          className="btn btn-ghost"
+          disabled={loading}
+          onClick={async () => {
+            setLoading(true);
+            setError(null);
+            try {
+              const dest = await invoke<string>("install_vencord_plugin");
+              setError(`Plugin copiado para ${dest}. Rode pnpm build && pnpm inject no Vencord.`);
+            } catch (err) {
+              setError(err instanceof Error ? err.message : String(err));
+            } finally {
+              setLoading(false);
+            }
+          }}
+        >
+          Copiar plugin Vencord
+        </button>
       </footer>
     </div>
   );

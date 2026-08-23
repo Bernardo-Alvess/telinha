@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { ShareQuality } from "../hooks/useLiveKitRoom";
+import type { ShareQuality } from "../hooks/useTelinhaRoom";
 
 export interface ShareSource {
   id: string;

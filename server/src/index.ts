@@ -1,48 +1,41 @@
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
-import { AccessToken } from "livekit-server-sdk";
+import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer, type WebSocket } from "ws";
 
 const envDir = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(envDir, "../.env") });
 dotenv.config();
 
 const PORT = Number(process.env.PORT ?? 3001);
-const LIVEKIT_URL = process.env.LIVEKIT_URL ?? "";
-const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY ?? "";
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET ?? "";
-
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 4;
+const ROOM_TTL_MS = 6 * 60 * 60 * 1000;
 
-interface RoomEntry {
-  roomName: string;
+interface ClientMessage {
+  type: string;
+  to?: string;
+  sdp?: string;
+  candidate?: unknown;
+}
+
+interface Participant {
+  id: string;
+  name: string;
+  sharing: boolean;
+  ws: WebSocket;
+}
+
+interface Room {
   createdAt: number;
+  participants: Map<string, Participant>;
 }
 
-const rooms = new Map<string, RoomEntry>();
-
-function isPlaceholder(value: string) {
-  return /your[_-]?project|your_api_/i.test(value);
-}
-
-function requireLiveKitConfig() {
-  if (
-    !LIVEKIT_URL ||
-    !LIVEKIT_API_KEY ||
-    !LIVEKIT_API_SECRET ||
-    isPlaceholder(LIVEKIT_URL) ||
-    isPlaceholder(LIVEKIT_API_KEY) ||
-    isPlaceholder(LIVEKIT_API_SECRET)
-  ) {
-    throw new Error(
-      "Configure LIVEKIT_URL, LIVEKIT_API_KEY e LIVEKIT_API_SECRET no arquivo server/.env",
-    );
-  }
-}
+const rooms = new Map<string, Room>();
 
 function generateCode(): string {
   let code = "";
@@ -56,37 +49,58 @@ function generateCode(): string {
   return code;
 }
 
-function createRoomName(code: string): string {
-  return `telinha-${code.toLowerCase()}`;
-}
-
 function sanitizeDisplayName(value: unknown): string {
   const name = typeof value === "string" ? value.trim().slice(0, 24) : "";
   return name || "Amigo";
 }
 
-function createParticipantIdentity(): string {
+function createParticipantId(): string {
   return `user-${randomBytes(4).toString("hex")}`;
 }
 
-async function createAccessToken(roomName: string, identity: string, displayName: string) {
-  requireLiveKitConfig();
+function publicParticipant(participant: Participant) {
+  return {
+    id: participant.id,
+    name: participant.name,
+    sharing: participant.sharing,
+  };
+}
 
-  const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
-    identity,
-    name: displayName,
-    ttl: "6h",
-  });
+function send(ws: WebSocket, payload: unknown) {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify(payload));
+  }
+}
 
-  at.addGrant({
-    roomJoin: true,
-    room: roomName,
-    canPublish: true,
-    canSubscribe: true,
-    canPublishData: true,
-  });
+function broadcast(room: Room, payload: unknown, exceptId?: string) {
+  for (const participant of room.participants.values()) {
+    if (participant.id !== exceptId) {
+      send(participant.ws, payload);
+    }
+  }
+}
 
-  return at.toJwt();
+function getRoom(code: string): Room | undefined {
+  return rooms.get(code.toUpperCase());
+}
+
+function removeParticipant(code: string, participantId: string) {
+  const room = getRoom(code);
+  if (!room) return;
+  const participant = room.participants.get(participantId);
+  if (!participant) return;
+  room.participants.delete(participantId);
+  broadcast(room, { type: "participant-left", participantId });
+  if (room.participants.size === 0) {
+    rooms.delete(code.toUpperCase());
+  }
+}
+
+function wsUrlFromRequest(req: express.Request): string {
+  const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0] ?? req.protocol;
+  const host = req.headers.host ?? `localhost:${PORT}`;
+  const wsProto = proto === "https" ? "wss" : "ws";
+  return `${wsProto}://${host}/ws`;
 }
 
 const app = express();
@@ -97,66 +111,125 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "telinha-server" });
 });
 
-app.post("/rooms", async (req, res) => {
-  try {
-    requireLiveKitConfig();
-    const displayName = sanitizeDisplayName(req.body?.displayName);
-    const code = generateCode();
-    const roomName = createRoomName(code);
-    const participantName = createParticipantIdentity();
-
-    rooms.set(code, { roomName, createdAt: Date.now() });
-
-    const token = await createAccessToken(roomName, participantName, displayName);
-
-    res.json({
-      code,
-      roomName,
-      participantName,
-      displayName,
-      livekitUrl: LIVEKIT_URL,
-      token,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Erro ao criar sala";
-    res.status(500).json({ error: message });
-  }
+app.post("/rooms", (req, res) => {
+  const displayName = sanitizeDisplayName(req.body?.displayName);
+  const code = generateCode();
+  const participantId = createParticipantId();
+  rooms.set(code, { createdAt: Date.now(), participants: new Map() });
+  res.json({
+    code,
+    participantId,
+    displayName,
+    wsUrl: wsUrlFromRequest(req),
+  });
 });
 
-app.post("/rooms/:code/join", async (req, res) => {
-  try {
-    requireLiveKitConfig();
-    const code = req.params.code.toUpperCase();
-    const entry = rooms.get(code);
+app.post("/rooms/:code/join", (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const room = rooms.get(code);
+  if (!room) {
+    res.status(404).json({ error: "Sala não encontrada. Verifique o código." });
+    return;
+  }
+  const displayName = sanitizeDisplayName(req.body?.displayName);
+  const participantId = createParticipantId();
+  res.json({
+    code,
+    participantId,
+    displayName,
+    wsUrl: wsUrlFromRequest(req),
+  });
+});
 
-    if (!entry) {
-      res.status(404).json({ error: "Sala não encontrada. Verifique o código." });
+const server = createServer(app);
+const wss = new WebSocketServer({ server, path: "/ws" });
+
+wss.on("connection", (ws, req) => {
+  const url = new URL(req.url ?? "/ws", "http://localhost");
+  const code = (url.searchParams.get("code") ?? "").toUpperCase();
+  const participantId = url.searchParams.get("participantId") ?? "";
+  const displayName = sanitizeDisplayName(url.searchParams.get("name"));
+  const room = rooms.get(code);
+
+  if (!room || !participantId) {
+    send(ws, { type: "error", message: "Sala inválida." });
+    ws.close();
+    return;
+  }
+
+  if (room.participants.has(participantId)) {
+    send(ws, { type: "error", message: "Essa sessão já está conectada." });
+    ws.close();
+    return;
+  }
+
+  const participant: Participant = {
+    id: participantId,
+    name: displayName,
+    sharing: false,
+    ws,
+  };
+  room.participants.set(participantId, participant);
+
+  send(ws, {
+    type: "hello",
+    you: publicParticipant(participant),
+    participants: [...room.participants.values()].map(publicParticipant),
+  });
+  broadcast(room, { type: "participant-joined", participant: publicParticipant(participant) }, participantId);
+
+  ws.on("message", (raw) => {
+    let message: ClientMessage;
+    try {
+      message = JSON.parse(String(raw)) as ClientMessage;
+    } catch {
       return;
     }
 
-    const displayName = sanitizeDisplayName(req.body?.displayName);
-    const participantName = createParticipantIdentity();
-    const token = await createAccessToken(entry.roomName, participantName, displayName);
+    const current = room.participants.get(participantId);
+    if (!current) return;
 
-    res.json({
-      code,
-      roomName: entry.roomName,
-      participantName,
-      displayName,
-      livekitUrl: LIVEKIT_URL,
-      token,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Erro ao entrar na sala";
-    res.status(500).json({ error: message });
-  }
+    if (message.type === "share-started") {
+      current.sharing = true;
+      broadcast(room, { type: "share-started", participantId, name: current.name }, participantId);
+      return;
+    }
+
+    if (message.type === "share-stopped") {
+      current.sharing = false;
+      broadcast(room, { type: "share-stopped", participantId }, participantId);
+      return;
+    }
+
+    if (
+      (message.type === "offer" || message.type === "answer" || message.type === "ice") &&
+      typeof message.to === "string"
+    ) {
+      const target = room.participants.get(message.to);
+      if (!target) return;
+      send(target.ws, {
+        type: message.type,
+        from: participantId,
+        sdp: message.sdp,
+        candidate: message.candidate,
+      });
+    }
+  });
+
+  ws.on("close", () => {
+    removeParticipant(code, participantId);
+  });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Telinha server rodando em http://0.0.0.0:${PORT}`);
-  if (!LIVEKIT_URL || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
-    console.warn(
-      "Aviso: LiveKit não configurado. Copie server/.env.example para server/.env",
-    );
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, room] of rooms) {
+    if (now - room.createdAt > ROOM_TTL_MS && room.participants.size === 0) {
+      rooms.delete(code);
+    }
   }
+}, 10 * 60 * 1000);
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Telinha server rodando em http://0.0.0.0:${PORT}`);
 });

@@ -163,7 +163,7 @@ pub fn start_share_capture(
                     let fitted = fit_width(image, max_width.max(640));
                     let width = fitted.width();
                     let height = fitted.height();
-                    if let Ok(data_url) = encode_jpeg(&fitted, 68) {
+                    if let Ok(data_url) = encode_jpeg(&fitted, 85) {
                         let _ = video_app.emit(
                             "share-frame",
                             ShareFrame {

@@ -30,6 +30,13 @@
       "csp": null
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["telinha"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

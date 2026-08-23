@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { ConnectionState } from "livekit-client";
 import type { RoomSession } from "../api";
-import { useLiveKitRoom } from "../hooks/useLiveKitRoom";
+import { ConnectionState, useTelinhaRoom } from "../hooks/useTelinhaRoom";
 import { ScreenSharePicker } from "./ScreenSharePicker";
 import { VideoTile } from "./VideoTile";
 import { VolumeControl } from "./VolumeControl";
@@ -11,9 +10,11 @@ import { VolumeControl } from "./VolumeControl";
 interface RoomScreenProps {
   session: RoomSession;
   onLeave: () => void;
+  openPicker?: boolean;
+  onPickerOpened?: () => void;
 }
 
-export function RoomScreen({ session, onLeave }: RoomScreenProps) {
+export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: RoomScreenProps) {
   const [copied, setCopied] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [watchingId, setWatchingId] = useState<string | null>(null);
@@ -32,15 +33,29 @@ export function RoomScreen({ session, onLeave }: RoomScreenProps) {
     startShare,
     stopShare,
     error,
-  } = useLiveKitRoom(session);
+  } = useTelinhaRoom(session);
 
-  const displayName = session.displayName || session.participantName;
-  const localId = session.participantName;
+  useEffect(() => {
+    void invoke("set_discord_presence", { code: session.code }).catch(() => undefined);
+    return () => {
+      void invoke("set_discord_presence", { code: null }).catch(() => undefined);
+    };
+  }, [session.code]);
+
+  const displayName = session.displayName;
+  const localId = session.participantId;
   const remoteShares = screenShares.filter((share) => share.participantIdentity !== localId);
   const localShare = screenShares.find((share) => share.participantIdentity === localId);
   const watchingShare = remoteShares.find((share) => share.participantIdentity === watchingId) ?? null;
   const watching = Boolean(watchingShare) && !pickerOpen;
   const hosting = isSharing && !pickerOpen && !watching;
+
+  useEffect(() => {
+    if (openPicker) {
+      setPickerOpen(true);
+      onPickerOpened?.();
+    }
+  }, [openPicker, onPickerOpened]);
 
   useEffect(() => {
     if (
@@ -59,35 +74,33 @@ export function RoomScreen({ session, onLeave }: RoomScreenProps) {
   }, [pickerOpen, watching, hosting]);
 
   useEffect(() => {
-    const audio = watchingShare?.audioTrack;
-    if (!audio || !watching) {
+    const stream = watchingShare?.stream;
+    const audioTracks = stream?.getAudioTracks() ?? [];
+    if (!watching || audioTracks.length === 0) {
       return;
     }
-    const element = audio.attach();
+    const element = document.createElement("audio");
     element.autoplay = true;
     element.setAttribute("playsinline", "true");
+    element.srcObject = new MediaStream(audioTracks);
     element.volume = volume / 100;
-    applyTrackVolume(audio, volume);
     document.body.appendChild(element);
     watchAudioRef.current = element;
     return () => {
-      audio.detach(element);
+      element.srcObject = null;
       element.remove();
       if (watchAudioRef.current === element) {
         watchAudioRef.current = null;
       }
     };
-  }, [watching, watchingShare?.audioTrack]);
+  }, [watching, watchingShare?.stream]);
 
   useEffect(() => {
     localStorage.setItem("telinha-watch-volume", String(volume));
-    if (watchingShare?.audioTrack) {
-      applyTrackVolume(watchingShare.audioTrack, volume);
-    }
     if (watchAudioRef.current) {
       watchAudioRef.current.volume = volume / 100;
     }
-  }, [volume, watchingShare?.audioTrack]);
+  }, [volume, watchingShare?.stream]);
 
   useEffect(() => {
     if (!watching) {
@@ -200,7 +213,7 @@ export function RoomScreen({ session, onLeave }: RoomScreenProps) {
         </header>
 
         <div className="video-area">
-          <VideoTile track={watchingShare.track} label={watchingShare.participantName} active />
+          <VideoTile stream={watchingShare.stream} label={watchingShare.participantName} active />
         </div>
 
         {remoteShares.length > 1 && (
@@ -262,7 +275,7 @@ export function RoomScreen({ session, onLeave }: RoomScreenProps) {
 
         <div className="host-preview">
           {localShare ? (
-            <VideoTile track={localShare.track} label="Seu preview" active />
+            <VideoTile stream={localShare.stream} label="Seu preview" active />
           ) : (
             <div className="video-placeholder">
               <p>Preparando preview...</p>
@@ -346,11 +359,4 @@ export function RoomScreen({ session, onLeave }: RoomScreenProps) {
       {error && <p className="error">{error}</p>}
     </div>
   );
-}
-
-function applyTrackVolume(track: unknown, volume: number) {
-  if (track && typeof track === "object" && "setVolume" in track) {
-    const audio = track as { setVolume: (value: number) => void };
-    audio.setVolume(volume / 100);
-  }
 }
