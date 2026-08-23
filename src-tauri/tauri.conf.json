@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Telinha",
+  "version": "0.1.0",
+  "identifier": "com.telinha.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Telinha",
+        "width": 400,
+        "height": 500,
+        "minWidth": 360,
+        "minHeight": 420,
+        "resizable": true,
+        "maximized": false,
+        "alwaysOnTop": false,
+        "decorations": true,
+        "transparent": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Complemento de tela para Discord",
+    "longDescription": "Compartilhe e assista telas por código de sala enquanto usa o Discord para voz e chat."
+  }
+}
