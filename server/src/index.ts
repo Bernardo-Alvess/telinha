@@ -6,9 +6,9 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-dotenv.config({
-  path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.env"),
-});
+const envDir = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(envDir, "../.env") });
+dotenv.config();
 
 const PORT = Number(process.env.PORT ?? 3001);
 const LIVEKIT_URL = process.env.LIVEKIT_URL ?? "";
@@ -152,8 +152,8 @@ app.post("/rooms/:code/join", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Telinha server rodando em http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Telinha server rodando em http://0.0.0.0:${PORT}`);
   if (!LIVEKIT_URL || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
     console.warn(
       "Aviso: LiveKit não configurado. Copie server/.env.example para server/.env",
