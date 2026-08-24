@@ -2,13 +2,12 @@ import { useEffect, useRef } from "react";
 
 interface VideoTileProps {
   stream: MediaStream;
-  label: string;
   active?: boolean;
   expandable?: boolean;
   onSelect?: () => void;
 }
 
-export function VideoTile({ stream, label, active, expandable, onSelect }: VideoTileProps) {
+export function VideoTile({ stream, active, expandable, onSelect }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -25,10 +24,8 @@ export function VideoTile({ stream, label, active, expandable, onSelect }: Video
       type="button"
       className={`video-tile ${active ? "active" : ""} ${expandable ? "expandable" : ""}`}
       onClick={onSelect}
-      title={label}
     >
       <video ref={videoRef} autoPlay playsInline muted />
-      <span className="video-label">{label}</span>
     </button>
   );
 }

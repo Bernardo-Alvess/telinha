@@ -7,6 +7,7 @@ export interface ShareSource {
   name: string;
   kind: "screen" | "window";
   thumbnail: string;
+  pid?: number;
 }
 
 interface ScreenSharePickerProps {
@@ -18,35 +19,73 @@ const QUALITY_PRESETS = [
   {
     id: "standard",
     name: "Padrão",
-    hint: "Melhor equilíbrio · 720p · 30fps",
-    fps: 30,
-    maxWidth: 1280,
-  },
-  {
-    id: "smooth",
-    name: "Vídeo mais suave",
-    hint: "Vídeo mais suave · 1080p · 30fps",
-    fps: 30,
-    maxWidth: 1920,
-  },
-  {
-    id: "games",
-    name: "Jogos",
-    hint: "Mais nítido · 1080p · 60fps",
+    hint: "Alta · 1440p · 60fps",
     fps: 60,
+    maxWidth: 2560,
+  },
+  {
+    id: "max",
+    name: "Máxima",
+    hint: "Resolução nativa · 60fps",
+    fps: 60,
+    maxWidth: 0,
+  },
+  {
+    id: "data",
+    name: "Leve",
+    hint: "Menos dados · 1080p · 30fps",
+    fps: 30,
     maxWidth: 1920,
   },
 ] as const;
 
+const QUALITY_KEY = "telinha-share-quality";
+const AUDIO_KEY = "telinha-share-audio";
+const GPU_KEY = "telinha-share-gpu";
+
+interface GpuEncodeInfo {
+  available: boolean;
+  vendor: string;
+  name: string;
+}
+
+function gpuEncodeLabel(info: GpuEncodeInfo | null): string {
+  if (!info) return "Detectando GPU...";
+  if (!info.available) {
+    return "GPU de vídeo não encontrada — envio pela CPU";
+  }
+  if (info.vendor === "nvidia") {
+    return info.name ? `Usar NVENC no envio (${info.name})` : "Usar NVENC no envio (H.264 na GPU)";
+  }
+  if (info.vendor === "amd") {
+    return "Usar encoder da GPU no envio (AMF / H.264)";
+  }
+  if (info.vendor === "intel") {
+    return "Usar encoder da GPU no envio (Quick Sync / H.264)";
+  }
+  return "Usar encoder da GPU no envio (H.264)";
+}
+
+function storedQualityIndex(): number {
+  const value = Number(localStorage.getItem(QUALITY_KEY));
+  return Number.isInteger(value) && value >= 0 && value < QUALITY_PRESETS.length ? value : 0;
+}
+
 export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps) {
-  const [tab, setTab] = useState<"window" | "screen" | "device">("window");
+  const [tab, setTab] = useState<"window" | "screen">("window");
   const [sources, setSources] = useState<ShareSource[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [qualityIndex, setQualityIndex] = useState(0);
+  const [qualityIndex, setQualityIndex] = useState(storedQualityIndex);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [sharing, setSharing] = useState(false);
-  const [includeAudio, setIncludeAudio] = useState(true);
+  const [includeAudio, setIncludeAudio] = useState(
+    () => localStorage.getItem(AUDIO_KEY) !== "0",
+  );
+  const [gpuInfo, setGpuInfo] = useState<GpuEncodeInfo | null>(null);
+  const [useGpuEncode, setUseGpuEncode] = useState(
+    () => localStorage.getItem(GPU_KEY) !== "0",
+  );
   const [error, setError] = useState<string | null>(null);
 
   async function loadSources() {
@@ -54,12 +93,8 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
       const next = await invoke<ShareSource[]>("list_share_sources");
       setSources(next);
       setSelectedId((current) => {
-        if (current && next.some((source) => source.id === current)) {
-          return current;
-        }
-        const preferred =
-          next.find((source) => source.kind === (tab === "device" ? "window" : tab)) ?? next[0];
-        return preferred?.id ?? null;
+        if (current && next.some((source) => source.id === current)) return current;
+        return next.find((source) => source.kind === tab)?.id ?? null;
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Não foi possível listar telas e janelas");
@@ -69,18 +104,44 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
   }
 
   useEffect(() => {
-    void loadSources();
-    const timer = window.setInterval(() => {
-      void loadSources();
-    }, 2500);
-    return () => window.clearInterval(timer);
+    void invoke<GpuEncodeInfo>("gpu_encode_info")
+      .then((info) => {
+        setGpuInfo(info);
+        if (!info.available) {
+          setUseGpuEncode(false);
+        }
+      })
+      .catch(() => {
+        setGpuInfo({ available: false, vendor: "none", name: "" });
+        setUseGpuEncode(false);
+      });
   }, []);
+
+  useEffect(() => {
+    function refresh() {
+      if (document.hidden) return;
+      void loadSources();
+    }
+    refresh();
+    const timer = window.setInterval(refresh, 4000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
+
+  useEffect(() => {
+    const first = sources.find((source) => source.kind === tab);
+    if (!sources.some((source) => source.id === selectedId && source.kind === tab)) {
+      setSelectedId(first?.id ?? null);
+    }
+  }, [sources, tab, selectedId]);
 
   const visibleSources = useMemo(
     () => sources.filter((source) => source.kind === tab),
     [sources, tab],
   );
-
   const quality = QUALITY_PRESETS[qualityIndex]!;
 
   async function handleShare() {
@@ -92,6 +153,7 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
         fps: quality.fps,
         maxWidth: quality.maxWidth,
         includeAudio,
+        useGpuEncode: Boolean(gpuInfo?.available && useGpuEncode),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Não foi possível compartilhar");
@@ -118,27 +180,16 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
         >
           Tela inteira
         </button>
-        <button
-          type="button"
-          role="tab"
-          className={tab === "device" ? "active" : ""}
-          onClick={() => setTab("device")}
-        >
-          Dispositivos
-        </button>
       </div>
 
       <div className="discord-grid">
-        {tab === "device" && (
-          <p className="discord-empty">Câmeras e outros dispositivos entram numa próxima versão.</p>
-        )}
-        {tab !== "device" && loading && <p className="discord-empty">Procurando fontes...</p>}
-        {tab !== "device" && !loading && visibleSources.length === 0 && (
+        {loading && <p className="discord-empty">Procurando fontes...</p>}
+        {!loading && visibleSources.length === 0 && (
           <p className="discord-empty">
             Nenhum {tab === "screen" ? "monitor" : "aplicativo"} encontrado.
           </p>
         )}
-        {tab !== "device" &&
+        {!loading &&
           visibleSources.map((source) => (
             <button
               key={source.id}
@@ -183,6 +234,7 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
                   className={index === qualityIndex ? "active" : ""}
                   onClick={() => {
                     setQualityIndex(index);
+                    localStorage.setItem(QUALITY_KEY, String(index));
                     setSettingsOpen(false);
                   }}
                 >
@@ -194,18 +246,35 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
           )}
         </div>
 
-        {tab !== "device" && (
-          <label className="share-audio-toggle">
-            <input
-              type="checkbox"
-              checked={includeAudio}
-              onChange={(event) => setIncludeAudio(event.target.checked)}
-            />
-            {tab === "screen"
-              ? "Compartilhar áudio do sistema"
-              : "Compartilhar áudio deste aplicativo"}
-          </label>
-        )}
+        <label className="share-audio-toggle">
+          <input
+            type="checkbox"
+            checked={includeAudio}
+            onChange={(event) => {
+              setIncludeAudio(event.target.checked);
+              localStorage.setItem(AUDIO_KEY, event.target.checked ? "1" : "0");
+            }}
+          />
+          {tab === "screen"
+            ? "Compartilhar áudio do sistema"
+            : "Compartilhar somente o áudio deste aplicativo"}
+        </label>
+
+        <label
+          className={`share-audio-toggle ${gpuInfo && !gpuInfo.available ? "is-disabled" : ""}`}
+          title="A captura continua em JPEG na CPU. Isto só escolhe se o envio WebRTC usa a GPU (H.264) ou a CPU (VP8)."
+        >
+          <input
+            type="checkbox"
+            checked={Boolean(gpuInfo?.available && useGpuEncode)}
+            disabled={!gpuInfo?.available}
+            onChange={(event) => {
+              setUseGpuEncode(event.target.checked);
+              localStorage.setItem(GPU_KEY, event.target.checked ? "1" : "0");
+            }}
+          />
+          {gpuEncodeLabel(gpuInfo)}
+        </label>
 
         <div className="discord-actions">
           <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={sharing}>
@@ -215,7 +284,7 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
             type="button"
             className="btn btn-go-live"
             onClick={() => void handleShare()}
-            disabled={!selectedId || sharing || tab === "device"}
+            disabled={!selectedId || sharing}
           >
             {sharing ? "Transmitindo..." : "Ao vivo"}
           </button>

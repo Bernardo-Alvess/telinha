@@ -1,14 +1,14 @@
+use crate::audio;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, ColorType, DynamicImage, RgbaImage};
+use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, ColorType, RgbaImage};
 use serde::Serialize;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
 };
 use std::thread;
-use std::time::Duration;
-use crate::audio;
-use tauri::{AppHandle, Emitter, Manager};
+use std::time::{Duration, Instant};
+use tauri::{ipc::Response, AppHandle, Emitter, Manager};
 use xcap::{Monitor, Window};
 
 #[derive(Clone, Serialize)]
@@ -24,7 +24,7 @@ pub struct ShareSource {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareFrame {
-    pub data_url: String,
+    pub seq: u64,
     pub width: u32,
     pub height: u32,
 }
@@ -33,16 +33,32 @@ struct CaptureSession {
     stop: std::sync::Arc<AtomicBool>,
 }
 
-static CAPTURE: Mutex<Option<CaptureSession>> = Mutex::new(None);
+struct EncodedFrame {
+    jpeg: Vec<u8>,
+}
 
-fn encode_jpeg(img: &RgbaImage, quality: u8) -> Result<String, String> {
-    let rgb = DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+static CAPTURE: Mutex<Option<CaptureSession>> = Mutex::new(None);
+static LATEST_FRAME: Mutex<Option<EncodedFrame>> = Mutex::new(None);
+static FRAME_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn encode_jpeg_bytes(img: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
+    let (width, height) = img.dimensions();
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for pixel in img.pixels() {
+        rgb.extend_from_slice(&[pixel[0], pixel[1], pixel[2]]);
+    }
     let mut buf = Vec::new();
     let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
     encoder
-        .encode(rgb.as_raw(), rgb.width(), rgb.height(), ColorType::Rgb8.into())
+        .encode(&rgb, width, height, ColorType::Rgb8.into())
         .map_err(|e| e.to_string())?;
-    Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(buf)))
+    Ok(buf)
+}
+
+fn jpeg_data_url(img: &RgbaImage, quality: u8) -> String {
+    encode_jpeg_bytes(img, quality)
+        .map(|bytes| format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes)))
+        .unwrap_or_default()
 }
 
 fn fit_width(img: RgbaImage, max_width: u32) -> RgbaImage {
@@ -65,7 +81,9 @@ fn capture_source_image(id: &str) -> Result<RgbaImage, String> {
     }
 
     if let Some(window_id) = id.strip_prefix("window:") {
-        let target: u32 = window_id.parse().map_err(|_| "Janela inválida".to_string())?;
+        let target: u32 = window_id
+            .parse()
+            .map_err(|_| "Janela inválida".to_string())?;
         for window in Window::all().map_err(|e| e.to_string())? {
             if window.id().unwrap_or_default() == target {
                 return window.capture_image().map_err(|e| e.to_string());
@@ -106,7 +124,7 @@ pub fn list_share_sources() -> Result<Vec<ShareSource>, String> {
         let thumbnail = monitor
             .capture_image()
             .ok()
-            .map(|img| encode_jpeg(&fit_width(img, 560), 70).unwrap_or_default())
+            .map(|img| jpeg_data_url(&fit_width(img, 560), 70))
             .unwrap_or_default();
         sources.push(ShareSource {
             id,
@@ -126,7 +144,7 @@ pub fn list_share_sources() -> Result<Vec<ShareSource>, String> {
         let thumbnail = window
             .capture_image()
             .ok()
-            .map(|img| encode_jpeg(&fit_width(img, 560), 70).unwrap_or_default())
+            .map(|img| jpeg_data_url(&fit_width(img, 560), 70))
             .unwrap_or_default();
         sources.push(ShareSource {
             id,
@@ -141,46 +159,125 @@ pub fn list_share_sources() -> Result<Vec<ShareSource>, String> {
 }
 
 #[tauri::command]
+pub fn resolve_share_source(label: String) -> Result<String, String> {
+    let needle = normalize_label(&label);
+    if !needle.is_empty() {
+        if let Ok(windows) = Window::all() {
+            let mut best: Option<(usize, String)> = None;
+            for window in windows {
+                if should_skip_window(&window) {
+                    continue;
+                }
+                let title = window.title().unwrap_or_default();
+                let norm = normalize_label(&title);
+                if norm.is_empty() {
+                    continue;
+                }
+                let score = if norm == needle {
+                    1000usize
+                } else if needle.contains(&norm) || norm.contains(&needle) {
+                    norm.len().min(needle.len())
+                } else {
+                    0
+                };
+                if score > 0
+                    && best
+                        .as_ref()
+                        .map(|(current, _)| score > *current)
+                        .unwrap_or(true)
+                {
+                    if let Ok(id) = window.id() {
+                        best = Some((score, format!("window:{id}")));
+                    }
+                }
+            }
+            if let Some((_, id)) = best {
+                return Ok(id);
+            }
+        }
+
+        if let Ok(monitors) = Monitor::all() {
+            for monitor in monitors {
+                let name = monitor
+                    .friendly_name()
+                    .or_else(|_| monitor.name())
+                    .unwrap_or_default();
+                let norm = normalize_label(&name);
+                if !norm.is_empty()
+                    && (norm == needle || needle.contains(&norm) || norm.contains(&needle))
+                {
+                    return Ok(format!("screen:{}", monitor.id().unwrap_or_default()));
+                }
+            }
+        }
+    }
+
+    first_screen_id()
+}
+
+fn normalize_label(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn first_screen_id() -> Result<String, String> {
+    let monitor = Monitor::all()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Nenhuma tela encontrada".to_string())?;
+    Ok(format!("screen:{}", monitor.id().unwrap_or_default()))
+}
+
+#[tauri::command]
 pub fn start_share_capture(
     app: AppHandle,
     id: String,
     fps: u32,
     max_width: u32,
     include_audio: Option<bool>,
+    include_video: Option<bool>,
 ) -> Result<(), String> {
     stop_share_capture();
 
     let stop = std::sync::Arc::new(AtomicBool::new(false));
-    let stop_flag = stop.clone();
     let source_id = id.clone();
-    let frame_interval = Duration::from_millis((1000 / fps.max(5).min(60)) as u64);
-    let video_app = app.clone();
 
-    thread::spawn(move || {
-        while !stop_flag.load(Ordering::Relaxed) {
-            match capture_source_image(&source_id) {
-                Ok(image) => {
-                    let fitted = fit_width(image, max_width.max(640));
-                    let width = fitted.width();
-                    let height = fitted.height();
-                    if let Ok(data_url) = encode_jpeg(&fitted, 85) {
-                        let _ = video_app.emit(
-                            "share-frame",
-                            ShareFrame {
-                                data_url,
-                                width,
-                                height,
-                            },
-                        );
+    if include_video.unwrap_or(true) {
+        let stop_flag = stop.clone();
+        let frame_interval = Duration::from_millis((1000 / fps.clamp(5, 60)) as u64);
+        let video_app = app.clone();
+        thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                let started = Instant::now();
+                match capture_source_image(&source_id) {
+                    Ok(image) => {
+                        let fitted = if max_width == 0 {
+                            image
+                        } else {
+                            fit_width(image, max_width)
+                        };
+                        let width = fitted.width();
+                        let height = fitted.height();
+                        if let Ok(jpeg) = encode_jpeg_bytes(&fitted, 80) {
+                            let seq = FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
+                            if let Ok(mut slot) = LATEST_FRAME.lock() {
+                                *slot = Some(EncodedFrame { jpeg });
+                            }
+                            let _ =
+                                video_app.emit("share-frame", ShareFrame { seq, width, height });
+                        }
+                    }
+                    Err(_) => {
+                        thread::sleep(Duration::from_millis(120));
+                        continue;
                     }
                 }
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(200));
+                if let Some(wait) = frame_interval.checked_sub(started.elapsed()) {
+                    thread::sleep(wait);
                 }
             }
-            thread::sleep(frame_interval);
-        }
-    });
+        });
+    }
 
     if include_audio.unwrap_or(true) {
         audio::start_share_audio(app, id.clone(), resolve_window_pid(&id), stop.clone());
@@ -202,11 +299,24 @@ fn resolve_window_pid(id: &str) -> Option<u32> {
 }
 
 #[tauri::command]
+pub fn read_share_frame() -> Result<Response, String> {
+    let frame = LATEST_FRAME
+        .lock()
+        .map_err(|error| error.to_string())?
+        .take()
+        .ok_or_else(|| "Nenhum quadro disponível".to_string())?;
+    Ok(Response::new(frame.jpeg))
+}
+
+#[tauri::command]
 pub fn stop_share_capture() {
     if let Ok(mut guard) = CAPTURE.lock() {
         if let Some(session) = guard.take() {
             session.stop.store(true, Ordering::Relaxed);
         }
+    }
+    if let Ok(mut frame) = LATEST_FRAME.lock() {
+        *frame = None;
     }
 }
 
@@ -224,8 +334,16 @@ pub fn set_window_layout(app: AppHandle, layout: String) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             window.set_fullscreen(true).map_err(|e| e.to_string())?;
         }
+        "watch-window" => {
+            let _ = window.set_always_on_top(false);
+            apply_window_size(&window, 720.0, 480.0, 1100.0, 700.0)?;
+        }
+        "watch-dual" => {
+            let _ = window.set_always_on_top(false);
+            apply_window_size(&window, 960.0, 540.0, 1440.0, 810.0)?;
+        }
         "host" => {
-            apply_window_size(&window, 400.0, 300.0, 460.0, 360.0)?;
+            apply_window_size(&window, 400.0, 300.0, 480.0, 420.0)?;
         }
         "home" => {
             apply_window_size(&window, 360.0, 420.0, 400.0, 500.0)?;
@@ -256,4 +374,18 @@ fn apply_window_size(
         .set_size(tauri::LogicalSize::new(w, h))
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    #[test]
+    fn encode_jpeg_bytes_writes_soi_marker() {
+        let image = RgbaImage::from_pixel(8, 8, Rgba([12, 34, 56, 255]));
+        let bytes = encode_jpeg_bytes(&image, 80).expect("jpeg");
+        assert!(bytes.len() > 16);
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
+    }
 }

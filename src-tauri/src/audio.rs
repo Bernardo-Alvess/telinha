@@ -10,8 +10,8 @@ use tauri::{AppHandle, Emitter};
 
 const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u32 = 2;
-const CHUNK_FRAMES: usize = 960;
-const BUFFER_DURATION_HNS: i64 = 200_000;
+const CHUNK_FRAMES: usize = 1920;
+const BUFFER_DURATION_HNS: i64 = 400_000;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,7 +21,12 @@ pub struct ShareAudio {
     pub channels: u32,
 }
 
-pub fn start_share_audio(app: AppHandle, source_id: String, pid: Option<u32>, stop: Arc<AtomicBool>) {
+pub fn start_share_audio(
+    app: AppHandle,
+    source_id: String,
+    pid: Option<u32>,
+    stop: Arc<AtomicBool>,
+) {
     thread::spawn(move || {
         if run_capture(&app, &source_id, pid, &stop).is_err() {
             emit_silence(&app, &stop);
@@ -72,7 +77,9 @@ fn run_capture(
             .initialize_client(&format, &wasapi::Direction::Capture, &mode)
             .map_err(|e| e.to_string())?;
 
-        let h_event = audio_client.set_get_eventhandle().map_err(|e| e.to_string())?;
+        let h_event = audio_client
+            .set_get_eventhandle()
+            .map_err(|e| e.to_string())?;
         let capture_client = audio_client
             .get_audiocaptureclient()
             .map_err(|e| e.to_string())?;
@@ -109,7 +116,8 @@ fn run_capture(
 
 #[cfg(windows)]
 fn open_system_loopback() -> Result<wasapi::AudioClient, String> {
-    let device = wasapi::get_default_device(&wasapi::Direction::Render).map_err(|e| e.to_string())?;
+    let device =
+        wasapi::get_default_device(&wasapi::Direction::Render).map_err(|e| e.to_string())?;
     device.get_iaudioclient().map_err(|e| e.to_string())
 }
 
@@ -144,8 +152,9 @@ fn emit_audio(app: &AppHandle, samples: Vec<f32>) {
 }
 
 fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+    let (chunks, _) = bytes.as_chunks::<4>();
+    chunks
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }

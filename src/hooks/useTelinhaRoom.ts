@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { signalingUrl, type RoomSession } from "../api";
+import { signalingUrl, type RoomSession } from "../lib/api";
+import { buildIceServers } from "../lib/ice";
+import { playStreamStarted, playViewerJoined } from "../lib/sounds";
+import { createShareAudioTrack } from "../media/shareAudio";
+import { createVideoSink, decodeShareJpeg } from "../media/shareVideo";
 
 export enum ConnectionState {
   Disconnected = "disconnected",
@@ -27,10 +31,11 @@ export interface ShareQuality {
   fps: number;
   maxWidth: number;
   includeAudio: boolean;
+  useGpuEncode: boolean;
 }
 
 interface ShareFrame {
-  dataUrl: string;
+  seq: number;
   width: number;
   height: number;
 }
@@ -55,12 +60,10 @@ interface SignalMessage {
   name?: string;
 }
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-];
+const ICE_SERVERS: RTCIceServer[] = buildIceServers(import.meta.env);
 
-const VIDEO_MAX_BITRATE = 2_500_000;
+const VIDEO_MAX_BITRATE = 16_000_000;
+const AUDIO_MAX_BITRATE = 320_000;
 
 export function useTelinhaRoom(session: RoomSession | null) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -69,12 +72,13 @@ export function useTelinhaRoom(session: RoomSession | null) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
   const peopleRef = useRef<Map<string, RoomPerson>>(new Map());
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const videoSinkCloseRef = useRef<(() => void) | null>(null);
   const unlistensRef = useRef<UnlistenFn[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const audioQueueRef = useRef<Float32Array[]>([]);
+  const audioNodeRef = useRef<AudioNode | null>(null);
+  const audioPortRef = useRef<MessagePort | null>(null);
   const sharingRef = useRef(false);
+  const useGpuEncodeRef = useRef(true);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>(
     ConnectionState.Disconnected,
@@ -82,10 +86,24 @@ export function useTelinhaRoom(session: RoomSession | null) {
   const [isSharing, setIsSharing] = useState(false);
   const [screenShares, setScreenShares] = useState<ScreenShareInfo[]>([]);
   const [participants, setParticipants] = useState<RoomPerson[]>([]);
+  const [watcherCounts, setWatcherCounts] = useState<Record<string, number>>({});
+  const [watcherNames, setWatcherNames] = useState<Record<string, string[]>>({});
   const [error, setError] = useState<string | null>(null);
+  const watchersRef = useRef<Map<string, Map<string, string>>>(new Map());
 
   const publishPeople = useCallback(() => {
     setParticipants([...peopleRef.current.values()]);
+  }, []);
+
+  const publishWatchers = useCallback(() => {
+    const counts: Record<string, number> = {};
+    const names: Record<string, string[]> = {};
+    for (const [shareId, watchers] of watchersRef.current) {
+      counts[shareId] = watchers.size;
+      names[shareId] = [...watchers.values()];
+    }
+    setWatcherCounts(counts);
+    setWatcherNames(names);
   }, []);
 
   const publishShares = useCallback((localId: string, localName: string) => {
@@ -134,19 +152,22 @@ export function useTelinhaRoom(session: RoomSession | null) {
   }, [closePeer]);
 
   const applyBitrate = useCallback(async (peer: RTCPeerConnection) => {
+    preferVideoCodecs(peer, useGpuEncodeRef.current);
     for (const sender of peer.getSenders()) {
-      if (sender.track?.kind !== "video") continue;
+      const kind = sender.track?.kind;
+      if (kind !== "video" && kind !== "audio") continue;
+      const maxBitrate = kind === "video" ? VIDEO_MAX_BITRATE : AUDIO_MAX_BITRATE;
       const params = sender.getParameters();
+      params.degradationPreference = "maintain-framerate";
       params.encodings = params.encodings?.length
         ? params.encodings.map((encoding) => ({
             ...encoding,
-            maxBitrate: VIDEO_MAX_BITRATE,
+            maxBitrate,
           }))
-        : [{ maxBitrate: VIDEO_MAX_BITRATE }];
+        : [{ maxBitrate }];
       try {
         await sender.setParameters(params);
       } catch {
-        // Some WebViews reject encodings before negotiation finishes.
       }
     }
   }, []);
@@ -158,7 +179,6 @@ export function useTelinhaRoom(session: RoomSession | null) {
       try {
         await peer.addIceCandidate(candidate);
       } catch {
-        // Candidate arrived for a discarded description.
       }
     }
   }, []);
@@ -204,6 +224,7 @@ export function useTelinhaRoom(session: RoomSession | null) {
             peer.addTrack(track, local);
           }
         }
+        preferVideoCodecs(peer, useGpuEncodeRef.current);
       }
 
       return peer;
@@ -235,11 +256,10 @@ export function useTelinhaRoom(session: RoomSession | null) {
       unlisten();
     }
     unlistensRef.current = [];
-    audioQueueRef.current = [];
+    audioPortRef.current = null;
     try {
       await invoke("stop_share_capture");
     } catch {
-      // Running outside Tauri.
     }
 
     if (localStreamRef.current) {
@@ -248,10 +268,11 @@ export function useTelinhaRoom(session: RoomSession | null) {
       }
     }
     localStreamRef.current = null;
-    canvasRef.current = null;
+    videoSinkCloseRef.current?.();
+    videoSinkCloseRef.current = null;
 
-    audioProcessorRef.current?.disconnect();
-    audioProcessorRef.current = null;
+    audioNodeRef.current?.disconnect();
+    audioNodeRef.current = null;
     if (audioContextRef.current) {
       await audioContextRef.current.close().catch(() => undefined);
       audioContextRef.current = null;
@@ -262,7 +283,6 @@ export function useTelinhaRoom(session: RoomSession | null) {
         try {
           peer.removeTrack(sender);
         } catch {
-          // Peer already tearing down.
         }
       }
     }
@@ -289,8 +309,9 @@ export function useTelinhaRoom(session: RoomSession | null) {
     ]);
     publishPeople();
 
-    const ws = new WebSocket(signalingUrl(session));
-    wsRef.current = ws;
+    let attempts = 0;
+    let fatal = false;
+    let reconnectTimer: number | undefined;
 
     const handleMessage = async (event: MessageEvent) => {
       let message: SignalMessage;
@@ -301,7 +322,10 @@ export function useTelinhaRoom(session: RoomSession | null) {
       }
 
       if (message.type === "error") {
+        fatal = true;
+        setConnectionState(ConnectionState.Disconnected);
         setError(message.message ?? "Erro na sala");
+        wsRef.current?.close();
         return;
       }
 
@@ -317,8 +341,16 @@ export function useTelinhaRoom(session: RoomSession | null) {
             },
           ]),
         );
+        const local = peopleRef.current.get(localId);
+        if (local) {
+          local.isSharing = sharingRef.current;
+        }
         publishPeople();
         setConnectionState(ConnectionState.Connected);
+        setError(null);
+        if (sharingRef.current) {
+          await offerToEveryone(localId, localName);
+        }
         return;
       }
 
@@ -339,6 +371,11 @@ export function useTelinhaRoom(session: RoomSession | null) {
       if (message.type === "participant-left" && message.participantId) {
         peopleRef.current.delete(message.participantId);
         closePeer(message.participantId);
+        watchersRef.current.delete(message.participantId);
+        for (const watchers of watchersRef.current.values()) {
+          watchers.delete(message.participantId);
+        }
+        publishWatchers();
         publishPeople();
         publishShares(localId, localName);
         return;
@@ -350,6 +387,7 @@ export function useTelinhaRoom(session: RoomSession | null) {
           person.isSharing = true;
           publishPeople();
         }
+        playStreamStarted();
         return;
       }
 
@@ -359,11 +397,33 @@ export function useTelinhaRoom(session: RoomSession | null) {
           person.isSharing = false;
         }
         remoteStreamsRef.current.delete(message.participantId);
+        watchersRef.current.delete(message.participantId);
         if (!sharingRef.current) {
           closePeer(message.participantId);
         }
+        publishWatchers();
         publishPeople();
         publishShares(localId, localName);
+        return;
+      }
+
+      if (message.type === "watch-started" && message.from && message.to) {
+        const watchers = watchersRef.current.get(message.to) ?? new Map<string, string>();
+        watchers.set(
+          message.from,
+          message.name ?? peopleRef.current.get(message.from)?.name ?? "Alguém",
+        );
+        watchersRef.current.set(message.to, watchers);
+        publishWatchers();
+        if (message.to === localId && message.from !== localId) {
+          playViewerJoined();
+        }
+        return;
+      }
+
+      if (message.type === "watch-stopped" && message.from && message.to) {
+        watchersRef.current.get(message.to)?.delete(message.from);
+        publishWatchers();
         return;
       }
 
@@ -397,37 +457,59 @@ export function useTelinhaRoom(session: RoomSession | null) {
         try {
           await peer.addIceCandidate(message.candidate);
         } catch {
-          // Stale candidate.
         }
       }
     };
 
-    ws.addEventListener("open", () => {
-      if (!closed) {
-        setConnectionState(ConnectionState.Connecting);
-      }
-    });
-    ws.addEventListener("message", (event) => {
-      void handleMessage(event);
-    });
-    ws.addEventListener("close", () => {
-      if (closed) return;
-      setConnectionState(ConnectionState.Disconnected);
-    });
-    ws.addEventListener("error", () => {
-      if (!closed) {
-        setError("Falha ao conectar no servidor de salas.");
-      }
-    });
+    const attachSocket = (socket: WebSocket) => {
+      socket.addEventListener("open", () => {
+        if (!closed) {
+          attempts = 0;
+          setConnectionState(ConnectionState.Connecting);
+        }
+      });
+      socket.addEventListener("message", (event) => {
+        void handleMessage(event);
+      });
+      socket.addEventListener("close", () => {
+        if (closed || fatal) return;
+        closeAllPeers();
+        if (attempts >= 8) {
+          setConnectionState(ConnectionState.Disconnected);
+          setError("A conexão caiu e não foi possível reconectar.");
+          return;
+        }
+        setConnectionState(ConnectionState.Reconnecting);
+        setError(null);
+        const delay = Math.min(1000 * 2 ** attempts, 15_000);
+        attempts += 1;
+        reconnectTimer = window.setTimeout(() => {
+          if (closed) return;
+          const next = new WebSocket(signalingUrl(session));
+          wsRef.current = next;
+          attachSocket(next);
+        }, delay);
+      });
+    };
+
+    const ws = new WebSocket(signalingUrl(session));
+    wsRef.current = ws;
+    attachSocket(ws);
 
     return () => {
       closed = true;
+      if (reconnectTimer != null) {
+        window.clearTimeout(reconnectTimer);
+      }
       void cleanupNativeShare();
       closeAllPeers();
-      ws.close();
+      wsRef.current?.close();
       wsRef.current = null;
       remoteStreamsRef.current.clear();
       peopleRef.current.clear();
+      watchersRef.current.clear();
+      setWatcherCounts({});
+      setWatcherNames({});
       setScreenShares([]);
       setParticipants([]);
       setConnectionState(ConnectionState.Disconnected);
@@ -441,6 +523,8 @@ export function useTelinhaRoom(session: RoomSession | null) {
     flushIce,
     getOrCreatePeer,
     offerTo,
+    publishWatchers,
+    offerToEveryone,
     publishPeople,
     publishShares,
     sendSignal,
@@ -452,89 +536,33 @@ export function useTelinhaRoom(session: RoomSession | null) {
 
       await cleanupNativeShare();
       setError(null);
+      useGpuEncodeRef.current = quality.useGpuEncode;
 
-      const canvas = document.createElement("canvas");
-      const context = canvas.getContext("2d");
-      if (!context) {
-        throw new Error("Não foi possível iniciar a captura");
-      }
-      canvasRef.current = canvas;
-
-      let sawFirstFrame = false;
-      let resolveFirst: (() => void) | undefined;
-      let rejectFirst: ((error: Error) => void) | undefined;
-      const firstFrame = new Promise<void>((resolve, reject) => {
-        resolveFirst = resolve;
-        rejectFirst = reject;
-      });
-      const timeout = window.setTimeout(() => {
-        if (!sawFirstFrame) {
-          rejectFirst?.(new Error("Nenhum quadro da tela chegou. Tente outra fonte."));
-        }
-      }, 5000);
-
-      unlistensRef.current.push(
-        await listen<ShareFrame>("share-frame", (event) => {
-          if (canvas.width !== event.payload.width || canvas.height !== event.payload.height) {
-            canvas.width = event.payload.width;
-            canvas.height = event.payload.height;
-          }
-          const image = new Image();
-          image.onload = () => {
-            context.drawImage(image, 0, 0, canvas.width, canvas.height);
-            if (!sawFirstFrame) {
-              sawFirstFrame = true;
-              window.clearTimeout(timeout);
-              resolveFirst?.();
-            }
-          };
-          image.src = event.payload.dataUrl;
-        }),
-      );
-
-      if (quality.includeAudio) {
-        unlistensRef.current.push(
-          await listen<ShareAudio>("share-audio", (event) => {
-            audioQueueRef.current.push(Float32Array.from(event.payload.samples));
-            if (audioQueueRef.current.length > 25) {
-              audioQueueRef.current.splice(0, audioQueueRef.current.length - 16);
-            }
-          }),
-        );
-      }
-
-      await invoke("start_share_capture", {
-        id: sourceId,
-        fps: quality.fps,
-        maxWidth: quality.maxWidth,
-        includeAudio: quality.includeAudio,
-      });
-
-      await firstFrame;
-
-      const stream = canvas.captureStream(quality.fps);
-      if (quality.includeAudio) {
-        const audioTrack = await createShareAudioTrack(
-          audioQueueRef,
+      try {
+        const stream = await startNativeShare(sourceId, quality, {
+          unlistensRef,
+          videoSinkCloseRef,
           audioContextRef,
-          audioProcessorRef,
-        );
-        if (audioTrack) {
-          stream.addTrack(audioTrack);
-        }
-      }
+          audioNodeRef,
+          audioPortRef,
+        });
 
-      localStreamRef.current = stream;
-      sharingRef.current = true;
-      const local = peopleRef.current.get(session.participantId);
-      if (local) {
-        local.isSharing = true;
+        localStreamRef.current = stream;
+        sharingRef.current = true;
+        const local = peopleRef.current.get(session.participantId);
+        if (local) {
+          local.isSharing = true;
+        }
+        setIsSharing(true);
+        publishPeople();
+        publishShares(session.participantId, session.displayName);
+        sendSignal({ type: "share-started" });
+        await offerToEveryone(session.participantId, session.displayName);
+      } catch (error) {
+        await cleanupNativeShare();
+        setError(error instanceof Error ? error.message : "Não foi possível compartilhar");
+        throw error;
       }
-      setIsSharing(true);
-      publishPeople();
-      publishShares(session.participantId, session.displayName);
-      sendSignal({ type: "share-started" });
-      await offerToEveryone(session.participantId, session.displayName);
     },
     [
       cleanupNativeShare,
@@ -546,12 +574,22 @@ export function useTelinhaRoom(session: RoomSession | null) {
     ],
   );
 
+  const setWatchingShare = useCallback(
+    (sharerId: string, watching: boolean) => {
+      if (!session || sharerId === session.participantId) return;
+      sendSignal({ type: watching ? "watch-started" : "watch-stopped", to: sharerId });
+    },
+    [sendSignal, session],
+  );
+
   const stopShare = useCallback(async () => {
     if (!session) {
       await cleanupNativeShare();
       return;
     }
     sendSignal({ type: "share-stopped" });
+    watchersRef.current.delete(session.participantId);
+    publishWatchers();
     await cleanupNativeShare();
     for (const [peerId, person] of peopleRef.current) {
       if (!person.isSharing && !person.isLocal) {
@@ -564,63 +602,135 @@ export function useTelinhaRoom(session: RoomSession | null) {
     }
     publishPeople();
     publishShares(session.participantId, session.displayName);
-  }, [cleanupNativeShare, closePeer, publishPeople, publishShares, sendSignal, session]);
+  }, [cleanupNativeShare, closePeer, publishPeople, publishShares, publishWatchers, sendSignal, session]);
 
   return {
     connectionState,
     isSharing,
     screenShares,
     participants,
+    watcherCounts,
+    watcherNames,
     startShare,
     stopShare,
+    setWatchingShare,
     error,
   };
 }
 
-async function createShareAudioTrack(
-  queueRef: MutableRefObject<Float32Array[]>,
-  contextRef: MutableRefObject<AudioContext | null>,
-  processorRef: MutableRefObject<ScriptProcessorNode | null>,
-): Promise<MediaStreamTrack | null> {
-  const context = new AudioContext({ sampleRate: 48000 });
-  await context.resume();
-  const destination = context.createMediaStreamDestination();
-  const processor = context.createScriptProcessor(1024, 2, 2);
-  const mute = context.createGain();
-  mute.gain.value = 0;
-
-  processor.onaudioprocess = (event) => {
-    const frames = event.outputBuffer.length;
-    const left = event.outputBuffer.getChannelData(0);
-    const right = event.outputBuffer.getChannelData(1);
-    const interleaved = pullInterleaved(queueRef.current, frames * 2);
-    for (let i = 0; i < frames; i += 1) {
-      left[i] = interleaved[i * 2] ?? 0;
-      right[i] = interleaved[i * 2 + 1] ?? 0;
-    }
-  };
-
-  processor.connect(destination);
-  processor.connect(mute);
-  mute.connect(context.destination);
-  contextRef.current = context;
-  processorRef.current = processor;
-  return destination.stream.getAudioTracks()[0] ?? null;
+interface AudioShareRefs {
+  unlistensRef: MutableRefObject<UnlistenFn[]>;
+  audioContextRef: MutableRefObject<AudioContext | null>;
+  audioNodeRef: MutableRefObject<AudioNode | null>;
+  audioPortRef: MutableRefObject<MessagePort | null>;
 }
 
-function pullInterleaved(queue: Float32Array[], needed: number): Float32Array {
-  const out = new Float32Array(needed);
-  let offset = 0;
-  while (offset < needed && queue.length > 0) {
-    const next = queue[0]!;
-    const take = Math.min(next.length, needed - offset);
-    out.set(next.subarray(0, take), offset);
-    if (take === next.length) {
-      queue.shift();
-    } else {
-      queue[0] = next.subarray(take);
+async function startNativeShare(
+  sourceId: string,
+  quality: ShareQuality,
+  refs: AudioShareRefs & { videoSinkCloseRef: MutableRefObject<(() => void) | null> },
+): Promise<MediaStream> {
+  const sink = createVideoSink(quality.fps);
+  refs.videoSinkCloseRef.current = sink.close;
+
+  let audioTrack: MediaStreamTrack | null = null;
+  if (quality.includeAudio) {
+    const audio = await createShareAudioTrack();
+    if (audio) {
+      audioTrack = audio.track;
+      refs.audioContextRef.current = audio.context;
+      refs.audioNodeRef.current = audio.node;
+      refs.audioPortRef.current = audio.port ?? null;
+      refs.unlistensRef.current.push(
+        await listen<ShareAudio>("share-audio", (event) => {
+          refs.audioPortRef.current?.postMessage(Float32Array.from(event.payload.samples));
+        }),
+      );
     }
-    offset += take;
   }
-  return out;
+
+  let sawFirstFrame = false;
+  let resolveFirst: (() => void) | undefined;
+  let rejectFirst: ((error: Error) => void) | undefined;
+  const firstFrame = new Promise<void>((resolve, reject) => {
+    resolveFirst = resolve;
+    rejectFirst = reject;
+  });
+  const timeout = window.setTimeout(() => {
+    if (!sawFirstFrame) {
+      rejectFirst?.(new Error("Nenhum quadro da tela chegou. Tente outra fonte."));
+    }
+  }, 5000);
+
+  const encodedQueue: Array<ArrayBuffer | Uint8Array> = [];
+  let decoding = false;
+  const pushFrame = async (bytes: ArrayBuffer | Uint8Array) => {
+    encodedQueue.push(bytes);
+    while (encodedQueue.length > 4) {
+      encodedQueue.shift();
+    }
+    if (decoding) return;
+    decoding = true;
+    while (encodedQueue.length > 0) {
+      const next = encodedQueue.shift();
+      if (!next) break;
+      try {
+        const bitmap = await decodeShareJpeg(next);
+        sink.push(bitmap);
+      } catch {
+        continue;
+      }
+      if (!sawFirstFrame) {
+        sawFirstFrame = true;
+        window.clearTimeout(timeout);
+        resolveFirst?.();
+      }
+    }
+    decoding = false;
+  };
+
+  refs.unlistensRef.current.push(
+    await listen<ShareFrame>("share-frame", () => {
+      void invoke<ArrayBuffer | Uint8Array>("read_share_frame")
+        .then((bytes) => pushFrame(bytes))
+        .catch(() => undefined);
+    }),
+  );
+
+  await invoke("start_share_capture", {
+    id: sourceId,
+    fps: quality.fps,
+    maxWidth: quality.maxWidth,
+    includeAudio: quality.includeAudio,
+    includeVideo: true,
+  });
+
+  await firstFrame;
+
+  const stream = new MediaStream([sink.track]);
+  if (audioTrack) {
+    stream.addTrack(audioTrack);
+  }
+  return stream;
+}
+
+function preferVideoCodecs(peer: RTCPeerConnection, useGpuEncode: boolean) {
+  const capabilities = RTCRtpSender.getCapabilities("video");
+  if (!capabilities) return;
+  const wanted = useGpuEncode ? /h264/i : /vp8/i;
+  const preferred = [
+    ...capabilities.codecs.filter((codec) => wanted.test(codec.mimeType)),
+    ...capabilities.codecs.filter(
+      (codec) => !wanted.test(codec.mimeType) && !/rtx|red|ulpfec/i.test(codec.mimeType),
+    ),
+    ...capabilities.codecs.filter((codec) => /rtx|red|ulpfec/i.test(codec.mimeType)),
+  ];
+  for (const transceiver of peer.getTransceivers()) {
+    if (transceiver.sender.track?.kind === "video" || transceiver.receiver.track?.kind === "video") {
+      try {
+        transceiver.setCodecPreferences(preferred);
+      } catch {
+      }
+    }
+  }
 }
