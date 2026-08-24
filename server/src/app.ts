@@ -15,6 +15,7 @@ import {
 
 const SEAT_TTL_MS = 2 * 60 * 1000;
 const RECONNECT_GRACE_MS = 45 * 1000;
+const WS_HEARTBEAT_MS = 25 * 1000;
 const ROOM_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_ROOM_SIZE = 16;
 const RATE_WINDOW_MS = 15 * 60 * 1000;
@@ -332,45 +333,12 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
   const http = createServer(app);
   const wss = new WebSocketServer({ server: http, path: "/ws" });
 
-  wss.on("connection", (ws, req) => {
-    const url = new URL(req.url ?? "/ws", "http://localhost");
-    const code = normalizeRoomCode(url.searchParams.get("code") ?? "");
-    const participantId = url.searchParams.get("participantId") ?? "";
-    const token = url.searchParams.get("token") ?? "";
-    const room = rooms.get(code);
-    const hold = room ? reclaimHold(room, participantId, token) : null;
-    const seat = room && !hold ? consumeSeat(room, participantId, token) : null;
-    const admitted = hold ?? seat;
-
-    if (!room || !admitted) {
-      send(ws, { type: "error", message: "Sala inválida." });
-      ws.close();
-      return;
-    }
-
-    const existing = room.participants.get(admitted.id);
-    if (existing) {
-      existing.replaced = true;
-      existing.ws.close();
-      room.participants.delete(admitted.id);
-    }
-
-    const participant: Participant = {
-      id: admitted.id,
-      name: admitted.name,
-      sharing: false,
-      token,
-      replaced: false,
-      ws,
-    };
-    room.participants.set(participant.id, participant);
-
-    send(ws, {
-      type: "hello",
-      you: publicParticipant(participant),
-      participants: [...room.participants.values()].map(publicParticipant),
-    });
-    broadcast(room, { type: "participant-joined", participant: publicParticipant(participant) }, participant.id);
+  function wireSocket(ws: WebSocket, room: Room, code: string, participant: Participant) {
+    const heartbeat = setInterval(() => {
+      if (ws.readyState === ws.OPEN) {
+        ws.ping();
+      }
+    }, WS_HEARTBEAT_MS);
 
     ws.on("message", (raw) => {
       let message: ClientMessage;
@@ -380,8 +348,13 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
         return;
       }
 
+      if (message.type === "ping") {
+        send(ws, { type: "pong" });
+        return;
+      }
+
       const current = room.participants.get(participant.id);
-      if (!current) return;
+      if (!current || current.ws !== ws) return;
 
       if (message.type === "share-started") {
         current.sharing = true;
@@ -427,8 +400,61 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     });
 
     ws.on("close", () => {
+      clearInterval(heartbeat);
+      const current = room.participants.get(participant.id);
+      if (!current || current.ws !== ws) return;
       parkParticipant(code, participant.id);
     });
+  }
+
+  function greet(ws: WebSocket, room: Room, participant: Participant) {
+    send(ws, {
+      type: "hello",
+      you: publicParticipant(participant),
+      participants: [...room.participants.values()].map(publicParticipant),
+    });
+  }
+
+  wss.on("connection", (ws, req) => {
+    const url = new URL(req.url ?? "/ws", "http://localhost");
+    const code = normalizeRoomCode(url.searchParams.get("code") ?? "");
+    const participantId = url.searchParams.get("participantId") ?? "";
+    const token = url.searchParams.get("token") ?? "";
+    const room = rooms.get(code);
+    const live = room?.participants.get(participantId);
+    if (room && live && tokensEqual(live.token, token)) {
+      live.replaced = true;
+      const previous = live.ws;
+      live.ws = ws;
+      live.replaced = false;
+      wireSocket(ws, room, code, live);
+      previous.close();
+      greet(ws, room, live);
+      return;
+    }
+
+    const hold = room ? reclaimHold(room, participantId, token) : null;
+    const seat = room && !hold ? consumeSeat(room, participantId, token) : null;
+    const admitted = hold ?? seat;
+
+    if (!room || !admitted) {
+      send(ws, { type: "error", message: "Sala inválida." });
+      ws.close();
+      return;
+    }
+
+    const participant: Participant = {
+      id: admitted.id,
+      name: admitted.name,
+      sharing: false,
+      token,
+      replaced: false,
+      ws,
+    };
+    room.participants.set(participant.id, participant);
+    wireSocket(ws, room, code, participant);
+    greet(ws, room, participant);
+    broadcast(room, { type: "participant-joined", participant: publicParticipant(participant) }, participant.id);
   });
 
   const cleanup = setInterval(() => {

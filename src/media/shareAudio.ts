@@ -14,7 +14,7 @@ class ShareAudioProcessor extends AudioWorkletProcessor {
       this.chunks.push(event.data);
       this.buffered += event.data.length;
       let samples = this.buffered;
-      while (samples > 48000 * 2 * 0.4 && this.chunks.length > 2) {
+      while (samples > 48000 * 2 * 1.0 && this.chunks.length > 2) {
         samples -= this.chunks[0].length;
         this.buffered -= this.chunks[0].length;
         this.chunks.shift();

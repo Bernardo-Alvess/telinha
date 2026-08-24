@@ -139,4 +139,43 @@ describe("telinha server", () => {
     host.close();
     viewer.close();
   });
+
+  it("substitui o WebSocket se o mesmo participante reconectar ainda admitido", async () => {
+    const { server, base } = await listen();
+    running = server;
+    const hostHttp = await postJson(`${base}/rooms`, { displayName: "Ana" });
+    const hostSession = hostHttp.data as unknown as RoomSession;
+    const viewerHttp = await postJson(`${base}/rooms/${hostSession.code}/join`, { displayName: "Bia" });
+    const viewerSession = viewerHttp.data as unknown as RoomSession;
+
+    const host = new WebSocket(signalingUrl(hostSession));
+    const first = new WebSocket(signalingUrl(viewerSession));
+    await waitForType(host, "hello");
+    await waitForType(first, "hello");
+
+    host.send(JSON.stringify({ type: "share-started" }));
+    await waitForType(first, "share-started");
+
+    let viewerLeft = false;
+    host.on("message", (raw) => {
+      const data = JSON.parse(String(raw)) as Record<string, unknown>;
+      if (data.type === "participant-left") {
+        viewerLeft = true;
+      }
+    });
+
+    const second = new WebSocket(signalingUrl(viewerSession));
+    await waitForType(second, "hello");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(viewerLeft).toBe(false);
+
+    const noticed = waitForType(host, "watch-started");
+    second.send(JSON.stringify({ type: "watch-started", to: hostSession.participantId }));
+    const payload = await noticed;
+    expect(payload.from).toBe(viewerSession.participantId);
+
+    first.close();
+    second.close();
+    host.close();
+  });
 });

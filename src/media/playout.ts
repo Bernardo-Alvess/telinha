@@ -1,1 +1,1 @@
-export const PLAYOUT_DELAY_MS = 140;
+export const PLAYOUT_DELAY_MS = 80;

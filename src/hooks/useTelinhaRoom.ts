@@ -51,9 +51,16 @@ interface SignalMessage {
 }
 
 const ICE_SERVERS: RTCIceServer[] = buildIceServers(import.meta.env);
+const ICE_CONFIG: RTCConfiguration = {
+  iceServers: ICE_SERVERS,
+  iceCandidatePoolSize: 4,
+};
 
 const VIDEO_MAX_BITRATE = 10_000_000;
 const AUDIO_MAX_BITRATE = 320_000;
+const P2P_BLOCKED_MESSAGE =
+  "Não foi possível conectar direto. A rede pode estar bloqueando o P2P.";
+const SIGNAL_PING_MS = 20_000;
 
 export function useTelinhaRoom(session: RoomSession | null) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -186,8 +193,9 @@ export function useTelinhaRoom(session: RoomSession | null) {
         return existing;
       }
 
-      const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const peer = new RTCPeerConnection(ICE_CONFIG);
       peersRef.current.set(peerId, peer);
+      let iceRestarted = false;
 
       peer.onicecandidate = (event) => {
         if (event.candidate) {
@@ -196,14 +204,32 @@ export function useTelinhaRoom(session: RoomSession | null) {
       };
 
       peer.onconnectionstatechange = () => {
-        if (peer.connectionState === "failed") {
-          setError("Não foi possível conectar direto. A rede pode estar bloqueando o P2P.");
+        if (peer.connectionState === "connected") {
+          iceRestarted = false;
+          setError((current) => (current === P2P_BLOCKED_MESSAGE ? null : current));
+          return;
         }
+        if (peer.connectionState !== "failed") {
+          return;
+        }
+        if (!iceRestarted && sharingRef.current) {
+          iceRestarted = true;
+          void (async () => {
+            try {
+              const offer = await peer.createOffer({ iceRestart: true });
+              await peer.setLocalDescription(offer);
+              sendSignal({ type: "offer", to: peerId, sdp: offer.sdp });
+            } catch {
+              setError(P2P_BLOCKED_MESSAGE);
+            }
+          })();
+          return;
+        }
+        setError(P2P_BLOCKED_MESSAGE);
       };
 
       peer.ontrack = (event) => {
         markVideoMotion(event.track);
-        tuneIncomingVideo(event.receiver);
         const [stream] = event.streams;
         if (stream) {
           remoteStreamsRef.current.set(peerId, stream);
@@ -317,10 +343,17 @@ export function useTelinhaRoom(session: RoomSession | null) {
         return;
       }
 
+      if (message.type === "pong" || message.type === "ping") {
+        return;
+      }
+
       if (message.type === "error") {
-        fatal = true;
-        setConnectionState(ConnectionState.Disconnected);
-        setError(message.message ?? "Erro na sala");
+        const text = message.message ?? "Erro na sala";
+        setError(text);
+        if (!text.includes("Sala inválida")) {
+          fatal = true;
+          setConnectionState(ConnectionState.Disconnected);
+        }
         wsRef.current?.close();
         return;
       }
@@ -429,7 +462,6 @@ export function useTelinhaRoom(session: RoomSession | null) {
         await flushIce(message.from, peer);
         for (const receiver of peer.getReceivers()) {
           markVideoMotion(receiver.track);
-          tuneIncomingVideo(receiver);
         }
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
@@ -444,7 +476,6 @@ export function useTelinhaRoom(session: RoomSession | null) {
         await flushIce(message.from, peer);
         for (const receiver of peer.getReceivers()) {
           markVideoMotion(receiver.track);
-          tuneIncomingVideo(receiver);
         }
         await applyBitrate(peer);
         return;
@@ -466,25 +497,32 @@ export function useTelinhaRoom(session: RoomSession | null) {
     };
 
     const attachSocket = (socket: WebSocket) => {
+      let pingTimer: number | undefined;
       socket.addEventListener("open", () => {
         if (!closed) {
           attempts = 0;
           setConnectionState(ConnectionState.Connecting);
         }
+        pingTimer = window.setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "ping" }));
+          }
+        }, SIGNAL_PING_MS);
       });
       socket.addEventListener("message", (event) => {
         void handleMessage(event);
       });
       socket.addEventListener("close", () => {
+        if (pingTimer != null) {
+          window.clearInterval(pingTimer);
+        }
         if (closed || fatal) return;
-        closeAllPeers();
         if (attempts >= 8) {
           setConnectionState(ConnectionState.Disconnected);
           setError("A conexão caiu e não foi possível reconectar.");
           return;
         }
         setConnectionState(ConnectionState.Reconnecting);
-        setError(null);
         const delay = Math.min(1000 * 2 ** attempts, 15_000);
         attempts += 1;
         reconnectTimer = window.setTimeout(() => {
@@ -671,16 +709,6 @@ async function attachLoopbackAudio(
 function markVideoMotion(track: MediaStreamTrack | null) {
   if (track && track.kind === "video") {
     track.contentHint = "motion";
-  }
-}
-
-function tuneIncomingVideo(receiver: RTCRtpReceiver) {
-  if (receiver.track?.kind !== "video") return;
-  try {
-    if ("jitterBufferTarget" in receiver) {
-      (receiver as RTCRtpReceiver & { jitterBufferTarget: number | null }).jitterBufferTarget = 80;
-    }
-  } catch {
   }
 }
 
