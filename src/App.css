@@ -119,9 +119,15 @@ body {
   background: var(--surface);
   color: #fff;
   font-size: 1rem;
-  letter-spacing: 0.15em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   text-align: center;
+  font-family: "Cascadia Mono", "Consolas", "Segoe UI", monospace;
+}
+
+.join-form input.is-discord-code {
+  letter-spacing: 0;
+  font-size: 0.78rem;
 }
 
 .join-form input:focus {
@@ -709,6 +715,75 @@ body {
   min-height: 0;
 }
 
+.room-screen.watching .video-area.mosaic {
+  display: grid;
+  gap: 3px;
+  background: #0b0c0e;
+  grid-auto-rows: 1fr;
+}
+
+.room-screen.watching .video-area.mosaic[data-count="3"] .watch-pane:last-child {
+  grid-column: 1 / -1;
+}
+
+.watch-pane {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: #000;
+}
+
+.watch-pane-name {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 3;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.watch-pane-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+  border: none;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 650;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.watch-pane-actions {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+}
+
+.watch-pane-close {
+  position: static;
+}
+
+.watch-pane-close:hover {
+  background: rgba(237, 66, 69, 0.9);
+}
+
+.live-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .room-screen.watching .video-label {
   display: none;
 }
@@ -744,8 +819,89 @@ body {
 .watch-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-left: auto;
+}
+
+.watch-leave {
+  margin-left: 8px;
+}
+
+.host-live-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  background: #113b29;
+  color: #b8f5d0;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.room-screen.watching:has(.host-live-bar) .watch-chrome.top {
+  top: 40px;
+}
+
+.room-toasts {
+  position: absolute;
+  right: 14px;
+  bottom: 84px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(320px, calc(100% - 28px));
+}
+
+.lobby-screen .room-toasts,
+.host-screen .room-toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+}
+
+.room-toast {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #2b2d31;
+  border: 1px solid #3f4147;
+  color: #fff;
+  font-size: 0.78rem;
+}
+
+.room-toast.ended {
+  color: #b5bac1;
+}
+
+.reconnect-banner {
+  width: 100%;
+  text-align: center;
+  background: #3c2f12;
+  color: #f0d48a;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 0.78rem;
+}
+
+.host-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.close-prompt-actions {
+  flex-wrap: wrap;
 }
 
 .discord-volume {
@@ -868,14 +1024,18 @@ body {
 }
 
 .room-screen.chrome-off .watch-chrome,
-.room-screen.chrome-off .overlay-tabs {
+.room-screen.chrome-off .overlay-tabs,
+.room-screen.chrome-off .watch-pane-name,
+.room-screen.chrome-off .watch-pane-actions {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.25s;
 }
 
 .room-screen.chrome-on .watch-chrome,
-.room-screen.chrome-on .overlay-tabs {
+.room-screen.chrome-on .overlay-tabs,
+.room-screen.chrome-on .watch-pane-name,
+.room-screen.chrome-on .watch-pane-actions {
   opacity: 1;
   transition: opacity 0.2s;
 }
@@ -993,4 +1153,8 @@ body {
 .host-preview .video-tile {
   min-height: 0;
   height: 100%;
+}
+
+.host-watch-list {
+  flex-shrink: 0;
 }

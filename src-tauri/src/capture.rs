@@ -338,8 +338,12 @@ pub fn set_window_layout(app: AppHandle, layout: String) -> Result<(), String> {
             let _ = window.set_always_on_top(false);
             apply_window_size(&window, 720.0, 480.0, 1100.0, 700.0)?;
         }
+        "watch-dual" => {
+            let _ = window.set_always_on_top(false);
+            apply_window_size(&window, 960.0, 540.0, 1440.0, 810.0)?;
+        }
         "host" => {
-            apply_window_size(&window, 400.0, 300.0, 460.0, 360.0)?;
+            apply_window_size(&window, 400.0, 300.0, 480.0, 420.0)?;
         }
         "home" => {
             apply_window_size(&window, 360.0, 420.0, 400.0, 500.0)?;

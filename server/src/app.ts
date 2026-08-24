@@ -396,6 +396,22 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
       }
 
       if (
+        (message.type === "watch-started" || message.type === "watch-stopped") &&
+        typeof message.to === "string"
+      ) {
+        const target = room.participants.get(message.to);
+        if (!target || target.id === participant.id) return;
+        if (message.type === "watch-started" && !target.sharing) return;
+        broadcast(room, {
+          type: message.type,
+          from: participant.id,
+          to: target.id,
+          name: current.name,
+        });
+        return;
+      }
+
+      if (
         (message.type === "offer" || message.type === "answer" || message.type === "ice") &&
         typeof message.to === "string"
       ) {

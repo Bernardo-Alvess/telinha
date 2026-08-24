@@ -74,6 +74,8 @@ npm run tauri build
 
 O instalador `.msi` / `.exe` fica em `src-tauri/target/release/bundle/`.
 
+Para gerar o instalador no GitHub sem commitar um release automático: **Actions → Release Windows → Run workflow**. O `.msi` e o `.exe` ficam nos artifacts do run e também num draft em Releases.
+
 ## Atalhos
 
 - `Ctrl+Shift+S` — iniciar/parar compartilhamento de tela

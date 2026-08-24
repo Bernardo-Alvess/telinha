@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { enterRoom, type RoomSession } from "./api";
-import { HomeScreen } from "./components/HomeScreen";
-import { RoomScreen } from "./components/RoomScreen";
-import { actionFromUrls } from "./deepLink";
+import { ClosePrompt } from "./components/ClosePrompt";
+import { enterRoom, type RoomSession } from "./lib/api";
+import { actionFromUrls } from "./lib/deepLink";
+import { HomeScreen } from "./screens/HomeScreen";
+import { RoomScreen } from "./screens/RoomScreen";
 import "./App.css";
 
 const NAME_KEY = "telinha-display-name";
@@ -24,6 +25,8 @@ function App() {
   const [pendingInvite, setPendingInvite] = useState<PendingInvite | null>(null);
   const [pendingShare, setPendingShare] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [isSharing, setIsSharing] = useState(false);
+  const [closePrompt, setClosePrompt] = useState(false);
   const sessionRef = useRef(session);
   useEffect(() => {
     sessionRef.current = session;
@@ -97,6 +100,26 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen("window-close-requested", () => {
+      setClosePrompt(true);
+    })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!pendingCode) return;
     let cancelled = false;
     void enterRoom(pendingCode, displayName())
@@ -128,6 +151,31 @@ function App() {
     setPendingCode(invite.code);
   }
 
+  function leaveRoom() {
+    setSession(null);
+    setPendingShare(false);
+    setIsSharing(false);
+    setClosePrompt(false);
+  }
+
+  const closeDialog = closePrompt ? (
+    <ClosePrompt
+      inRoom={Boolean(session)}
+      isSharing={isSharing}
+      onMinimize={() => {
+        setClosePrompt(false);
+        void invoke("hide_main_window").catch(() => undefined);
+      }}
+      onLeaveRoom={() => {
+        leaveRoom();
+      }}
+      onQuit={() => {
+        void invoke("quit_app").catch(() => undefined);
+      }}
+      onCancel={() => setClosePrompt(false)}
+    />
+  ) : null;
+
   const inviteBanner = pendingInvite ? (
     <div className="notice">
       <strong>Entrar na sala {pendingInvite.code}?</strong>
@@ -150,13 +198,12 @@ function App() {
   if (session) {
     return (
       <div className="app-shell">
+        {closeDialog}
         {inviteBanner ? <div className="notice-overlay">{inviteBanner}</div> : null}
         <RoomScreen
           session={session}
-          onLeave={() => {
-            setSession(null);
-            setPendingShare(false);
-          }}
+          onLeave={leaveRoom}
+          onSharingChange={setIsSharing}
           openPicker={pendingShare}
           onPickerOpened={() => setPendingShare(false)}
         />
@@ -165,7 +212,15 @@ function App() {
   }
 
   return (
-    <HomeScreen onJoin={setSession} error={joinError} invite={inviteBanner} />
+    <>
+      {closeDialog}
+      <HomeScreen
+        onJoin={setSession}
+        error={joinError}
+        invite={inviteBanner}
+        joining={Boolean(pendingCode)}
+      />
+    </>
   );
 }
 

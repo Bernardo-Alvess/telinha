@@ -30,6 +30,20 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    capture::stop_share_capture();
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -61,6 +75,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             copy_to_clipboard,
             show_main_window,
+            hide_main_window,
+            quit_app,
             vencord::install_vencord_plugin,
             discord::set_discord_presence,
             capture::list_share_sources,
@@ -74,10 +90,7 @@ pub fn run() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                let _ = window.hide();
-            }
-            tauri::WindowEvent::Focused(focused) => {
-                let _ = window.set_always_on_top(*focused);
+                let _ = window.emit("window-close-requested", ());
             }
             _ => {}
         })

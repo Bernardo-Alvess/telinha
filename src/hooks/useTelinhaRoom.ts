@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { signalingUrl, type RoomSession } from "../api";
-import { buildIceServers } from "../ice";
-import { createShareAudioTrack } from "../shareAudio";
-import { createVideoSink, decodeShareJpeg } from "../shareVideo";
+import { signalingUrl, type RoomSession } from "../lib/api";
+import { buildIceServers } from "../lib/ice";
+import { playStreamStarted, playViewerJoined } from "../lib/sounds";
+import { createShareAudioTrack } from "../media/shareAudio";
+import { createVideoSink, decodeShareJpeg } from "../media/shareVideo";
 
 export enum ConnectionState {
   Disconnected = "disconnected",
@@ -85,10 +86,24 @@ export function useTelinhaRoom(session: RoomSession | null) {
   const [isSharing, setIsSharing] = useState(false);
   const [screenShares, setScreenShares] = useState<ScreenShareInfo[]>([]);
   const [participants, setParticipants] = useState<RoomPerson[]>([]);
+  const [watcherCounts, setWatcherCounts] = useState<Record<string, number>>({});
+  const [watcherNames, setWatcherNames] = useState<Record<string, string[]>>({});
   const [error, setError] = useState<string | null>(null);
+  const watchersRef = useRef<Map<string, Map<string, string>>>(new Map());
 
   const publishPeople = useCallback(() => {
     setParticipants([...peopleRef.current.values()]);
+  }, []);
+
+  const publishWatchers = useCallback(() => {
+    const counts: Record<string, number> = {};
+    const names: Record<string, string[]> = {};
+    for (const [shareId, watchers] of watchersRef.current) {
+      counts[shareId] = watchers.size;
+      names[shareId] = [...watchers.values()];
+    }
+    setWatcherCounts(counts);
+    setWatcherNames(names);
   }, []);
 
   const publishShares = useCallback((localId: string, localName: string) => {
@@ -356,6 +371,11 @@ export function useTelinhaRoom(session: RoomSession | null) {
       if (message.type === "participant-left" && message.participantId) {
         peopleRef.current.delete(message.participantId);
         closePeer(message.participantId);
+        watchersRef.current.delete(message.participantId);
+        for (const watchers of watchersRef.current.values()) {
+          watchers.delete(message.participantId);
+        }
+        publishWatchers();
         publishPeople();
         publishShares(localId, localName);
         return;
@@ -367,6 +387,7 @@ export function useTelinhaRoom(session: RoomSession | null) {
           person.isSharing = true;
           publishPeople();
         }
+        playStreamStarted();
         return;
       }
 
@@ -376,11 +397,33 @@ export function useTelinhaRoom(session: RoomSession | null) {
           person.isSharing = false;
         }
         remoteStreamsRef.current.delete(message.participantId);
+        watchersRef.current.delete(message.participantId);
         if (!sharingRef.current) {
           closePeer(message.participantId);
         }
+        publishWatchers();
         publishPeople();
         publishShares(localId, localName);
+        return;
+      }
+
+      if (message.type === "watch-started" && message.from && message.to) {
+        const watchers = watchersRef.current.get(message.to) ?? new Map<string, string>();
+        watchers.set(
+          message.from,
+          message.name ?? peopleRef.current.get(message.from)?.name ?? "Alguém",
+        );
+        watchersRef.current.set(message.to, watchers);
+        publishWatchers();
+        if (message.to === localId && message.from !== localId) {
+          playViewerJoined();
+        }
+        return;
+      }
+
+      if (message.type === "watch-stopped" && message.from && message.to) {
+        watchersRef.current.get(message.to)?.delete(message.from);
+        publishWatchers();
         return;
       }
 
@@ -464,6 +507,9 @@ export function useTelinhaRoom(session: RoomSession | null) {
       wsRef.current = null;
       remoteStreamsRef.current.clear();
       peopleRef.current.clear();
+      watchersRef.current.clear();
+      setWatcherCounts({});
+      setWatcherNames({});
       setScreenShares([]);
       setParticipants([]);
       setConnectionState(ConnectionState.Disconnected);
@@ -477,6 +523,7 @@ export function useTelinhaRoom(session: RoomSession | null) {
     flushIce,
     getOrCreatePeer,
     offerTo,
+    publishWatchers,
     offerToEveryone,
     publishPeople,
     publishShares,
@@ -527,12 +574,22 @@ export function useTelinhaRoom(session: RoomSession | null) {
     ],
   );
 
+  const setWatchingShare = useCallback(
+    (sharerId: string, watching: boolean) => {
+      if (!session || sharerId === session.participantId) return;
+      sendSignal({ type: watching ? "watch-started" : "watch-stopped", to: sharerId });
+    },
+    [sendSignal, session],
+  );
+
   const stopShare = useCallback(async () => {
     if (!session) {
       await cleanupNativeShare();
       return;
     }
     sendSignal({ type: "share-stopped" });
+    watchersRef.current.delete(session.participantId);
+    publishWatchers();
     await cleanupNativeShare();
     for (const [peerId, person] of peopleRef.current) {
       if (!person.isSharing && !person.isLocal) {
@@ -545,15 +602,18 @@ export function useTelinhaRoom(session: RoomSession | null) {
     }
     publishPeople();
     publishShares(session.participantId, session.displayName);
-  }, [cleanupNativeShare, closePeer, publishPeople, publishShares, sendSignal, session]);
+  }, [cleanupNativeShare, closePeer, publishPeople, publishShares, publishWatchers, sendSignal, session]);
 
   return {
     connectionState,
     isSharing,
     screenShares,
     participants,
+    watcherCounts,
+    watcherNames,
     startShare,
     stopShare,
+    setWatchingShare,
     error,
   };
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { createRoom, enterRoom, type RoomSession } from "../api";
+import { createRoom, enterRoom, type RoomSession } from "../lib/api";
 
 const NAME_KEY = "telinha-display-name";
 
@@ -8,9 +8,10 @@ interface HomeScreenProps {
   onJoin: (session: RoomSession) => void;
   error?: string | null;
   invite?: ReactNode;
+  joining?: boolean;
 }
 
-export function HomeScreen({ onJoin, error: incomingError, invite }: HomeScreenProps) {
+export function HomeScreen({ onJoin, error: incomingError, invite, joining }: HomeScreenProps) {
   const [displayName, setDisplayName] = useState(
     () => localStorage.getItem(NAME_KEY) ?? "",
   );
@@ -20,6 +21,7 @@ export function HomeScreen({ onJoin, error: incomingError, invite }: HomeScreenP
   const [vencordConfirm, setVencordConfirm] = useState(false);
   const [vencordMessage, setVencordMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(incomingError ?? null);
+  const nickname = displayName.trim();
 
   useEffect(() => {
     if (incomingError) {
@@ -28,12 +30,15 @@ export function HomeScreen({ onJoin, error: incomingError, invite }: HomeScreenP
   }, [incomingError]);
 
   function persistName() {
-    const name = displayName.trim() || "Amigo";
-    localStorage.setItem(NAME_KEY, name);
-    return name;
+    localStorage.setItem(NAME_KEY, nickname);
+    return nickname;
   }
 
   async function handleCreate() {
+    if (!nickname) {
+      setError("Escolha um apelido para os outros te verem.");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -64,6 +69,10 @@ export function HomeScreen({ onJoin, error: incomingError, invite }: HomeScreenP
     event.preventDefault();
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return;
+    if (!nickname) {
+      setError("Escolha um apelido para os outros te verem.");
+      return;
+    }
 
     setLoading(true);
     setError(null);
@@ -81,7 +90,7 @@ export function HomeScreen({ onJoin, error: incomingError, invite }: HomeScreenP
     <div className="screen home-screen">
       <header className="header">
         <h1>Telinha</h1>
-        <p>Compartilhe a tela enquanto usa o Discord</p>
+        <p>A voz fica no Discord. Aqui é só a tela.</p>
       </header>
 
       <div className="actions">
@@ -93,7 +102,7 @@ export function HomeScreen({ onJoin, error: incomingError, invite }: HomeScreenP
             value={displayName}
             maxLength={24}
             onChange={(e) => setDisplayName(e.target.value)}
-            disabled={loading}
+            disabled={loading || joining}
           />
         </label>
 
@@ -101,28 +110,34 @@ export function HomeScreen({ onJoin, error: incomingError, invite }: HomeScreenP
           type="button"
           className="btn btn-primary"
           onClick={handleCreate}
-          disabled={loading}
+          disabled={loading || joining || !nickname}
         >
-          Criar sala
+          {loading ? "Abrindo sala..." : "Criar sala"}
         </button>
 
         <form className="join-form" onSubmit={handleJoin}>
           <input
             type="text"
+            className={code.trim().startsWith("D") ? "is-discord-code" : ""}
             placeholder="Código da sala"
             value={code}
             onChange={(e) => setCode(e.target.value.toUpperCase())}
             maxLength={24}
-            disabled={loading}
+            disabled={loading || joining}
           />
-          <button type="submit" className="btn btn-secondary" disabled={loading || !code.trim()}>
-            Entrar
+          <button
+            type="submit"
+            className="btn btn-secondary"
+            disabled={loading || joining || !code.trim() || !nickname}
+          >
+            {joining ? "Entrando..." : "Entrar"}
           </button>
         </form>
       </div>
 
       {invite}
 
+      {joining && <p className="hint">Entrando na sala...</p>}
       {error && <p className="error">{error}</p>}
 
       <footer className="vencord-setup">

@@ -49,6 +49,21 @@ function waitMessage(ws: WebSocket): Promise<Record<string, unknown>> {
   });
 }
 
+function waitForType(ws: WebSocket, type: string): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout waiting ${type}`)), 3000);
+    function onMessage(raw: WebSocket.RawData) {
+      const data = JSON.parse(String(raw)) as Record<string, unknown>;
+      if (data.type !== type) return;
+      clearTimeout(timer);
+      ws.off("message", onMessage);
+      resolve(data);
+    }
+    ws.on("message", onMessage);
+    ws.once("error", reject);
+  });
+}
+
 describe("telinha server", () => {
   let running: TelinhaServer | undefined;
 
@@ -96,5 +111,32 @@ describe("telinha server", () => {
     const hello = await waitMessage(good);
     expect(hello.type).toBe("hello");
     good.close();
+  });
+
+  it("avisa o host quando alguém começa a assistir", async () => {
+    const { server, base } = await listen();
+    running = server;
+    const hostHttp = await postJson(`${base}/rooms`, { displayName: "Ana" });
+    const hostSession = hostHttp.data as unknown as RoomSession;
+    const viewerHttp = await postJson(`${base}/rooms/${hostSession.code}/join`, { displayName: "Bia" });
+    const viewerSession = viewerHttp.data as unknown as RoomSession;
+
+    const host = new WebSocket(signalingUrl(hostSession));
+    const viewer = new WebSocket(signalingUrl(viewerSession));
+    await waitForType(host, "hello");
+    await waitForType(viewer, "hello");
+
+    host.send(JSON.stringify({ type: "share-started" }));
+    const live = await waitForType(viewer, "share-started");
+    expect(live.type).toBe("share-started");
+
+    const noticed = waitForType(host, "watch-started");
+    viewer.send(JSON.stringify({ type: "watch-started", to: hostSession.participantId }));
+    const payload = await noticed;
+    expect(payload.from).toBe(viewerSession.participantId);
+    expect(payload.to).toBe(hostSession.participantId);
+
+    host.close();
+    viewer.close();
   });
 });
