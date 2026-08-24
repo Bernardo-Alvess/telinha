@@ -29,7 +29,7 @@ cp .env.example .env
 cp server/.env.example server/.env
 ```
 
-No `.env` do app, `VITE_API_URL=http://localhost:3001` serve para desenvolver. O build de produção do `.exe` exige a URL pública do servidor (não use localhost, a menos que `VITE_ALLOW_LOCAL_API=1`).
+No `.env` do app, `VITE_API_URL=http://localhost:3001` serve para desenvolver. O `tauri build` usa `.env.production` (servidor público). Para um `.exe` apontando para localhost, `VITE_ALLOW_LOCAL_API=1`.
 
 TURN é opcional (`VITE_TURN_URL`, `VITE_TURN_USERNAME`, `VITE_TURN_CREDENTIAL`). Sem isso o WebRTC usa só STUN e pode falhar em redes restritas.
 
@@ -63,8 +63,10 @@ npm install && cd server && npm install && cd .. && npm run dev:all
 npm test
 npm run lint
 cd server && npm test && npm run lint
-cd src-tauri && cargo test
+cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
+
+O CI do PR só roda `cargo fmt --check` no Rust. Compilar Tauri + Clippy no Windows passava de 10 minutos; o compile de verdade fica no `tauri build` local e no **Release Windows**.
 
 ## Build Windows
 
