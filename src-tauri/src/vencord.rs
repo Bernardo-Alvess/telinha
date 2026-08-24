@@ -83,10 +83,7 @@ fn find_userplugin_dir(resource_dir: &Path) -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn bundled_candidates(resource_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![
-        resource_dir.to_path_buf(),
-        resource_dir.join("resources"),
-    ];
+    let mut dirs = vec![resource_dir.to_path_buf(), resource_dir.join("resources")];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             dirs.push(dir.to_path_buf());
@@ -116,7 +113,10 @@ fn copy_bundle(from: &Path, to: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn install_userplugin(plugin_dir: &Path, vencord_root: &Path) -> Result<(), String> {
-    copy_dir(plugin_dir, &vencord_root.join("src").join("userplugins").join("telinha"))
+    copy_dir(
+        plugin_dir,
+        &vencord_root.join("src").join("userplugins").join("telinha"),
+    )
 }
 
 #[cfg(windows)]
