@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "Telinha",
-        "width": 400,
-        "height": 500,
-        "minWidth": 360,
-        "minHeight": 420,
+        "width": 720,
+        "height": 580,
+        "minWidth": 640,
+        "minHeight": 500,
         "resizable": true,
         "maximized": false,
         "alwaysOnTop": false,
@@ -41,7 +41,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "resources/vencord-dist/*": "vencord-dist/"
+      "resources/vencord-dist/*": "vencord-dist/",
+      "../vencord-plugin/telinha/*": "vencord-plugin/telinha/"
     },
     "icon": [
       "icons/32x32.png",

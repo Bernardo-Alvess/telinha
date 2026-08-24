@@ -4,27 +4,30 @@ import { displayMediaOptions } from "./displayShare";
 const quality = {
   fps: 60,
   maxWidth: 2560,
+  maxHeight: 1440,
+  maxBitrate: 24_000_000,
   includeAudio: true,
   useGpuEncode: true,
 };
 
 describe("display media options", () => {
-  it("asks Chromium for a monitor when the picker chose a screen", () => {
-    const options = displayMediaOptions(quality, "screen:1");
+  it("asks Chromium for a smooth 60fps stream", () => {
+    const options = displayMediaOptions(quality);
     expect(options.video).toMatchObject({
-      displaySurface: "monitor",
-      frameRate: { ideal: 60, max: 60 },
-      width: { ideal: 2560, max: 2560 },
+      frameRate: { ideal: 60 },
+      width: { max: 2560 },
+      height: { max: 1440 },
+      resizeMode: "none",
     });
-    expect(options.audio).toBeTruthy();
-    expect(options.systemAudio).toBe("include");
+    expect(options.video).not.toHaveProperty("displaySurface");
+    expect(options.audio).toBe(false);
+    expect(options.systemAudio).toBe("exclude");
   });
 
-  it("asks Chromium for a window and can skip system audio", () => {
-    const options = displayMediaOptions({ ...quality, includeAudio: false, maxWidth: 0 }, "window:9");
+  it("can skip system audio and keep native resolution", () => {
+    const options = displayMediaOptions({ ...quality, includeAudio: false, maxWidth: 0 });
     expect(options.video).toMatchObject({
-      displaySurface: "window",
-      frameRate: { ideal: 60, max: 60 },
+      frameRate: { ideal: 60 },
     });
     expect(options.video).not.toHaveProperty("width");
     expect(options.audio).toBe(false);

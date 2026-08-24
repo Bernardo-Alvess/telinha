@@ -4,7 +4,7 @@ import { SelectedChannelStore, showToast, Toasts, UserStore } from "@webpack/com
 const ACTIONS_BUTTON_ID = "telinha-actions-btn";
 const STATUS_BUTTON_ID = "telinha-status-btn";
 const BAR_GROUP_ID = "telinha-call-bar-btn";
-const TELINHA_VERSION = "21";
+const TELINHA_VERSION = "22";
 const VOICE_ROW_ATTR = "data-telinha-row";
 const STYLE_ID = "telinha-plugin-style";
 const ROW_FIFTH_MIN = 240;
@@ -359,13 +359,51 @@ let observer: MutationObserver | undefined;
 let interval: number | undefined;
 let mountScheduled = false;
 
+function inVoice() {
+    return Boolean(SelectedChannelStore.getVoiceChannelId?.());
+}
+
 function scheduleMount() {
     if (mountScheduled) return;
     mountScheduled = true;
     requestAnimationFrame(() => {
         mountScheduled = false;
-        mountButtons();
+        if (inVoice()) mountButtons();
     });
+}
+
+function startWatching() {
+    if (observer) return;
+    observer = new MutationObserver(() => scheduleMount());
+    observer.observe(document.body, { childList: true, subtree: true });
+    interval = window.setInterval(() => {
+        if (inVoice()) mountButtons();
+    }, 2500);
+}
+
+function stopWatching() {
+    observer?.disconnect();
+    observer = undefined;
+    if (interval) window.clearInterval(interval);
+    interval = undefined;
+}
+
+function unmountButtons() {
+    document.getElementById("telinha-account-btn")?.remove();
+    document.getElementById(ACTIONS_BUTTON_ID)?.remove();
+    document.getElementById(STATUS_BUTTON_ID)?.remove();
+    document.getElementById(BAR_GROUP_ID)?.remove();
+    document.getElementById(STYLE_ID)?.remove();
+}
+
+function syncCallUi() {
+    if (!inVoice()) {
+        stopWatching();
+        unmountButtons();
+        return;
+    }
+    startWatching();
+    mountButtons();
 }
 
 export default definePlugin({
@@ -376,21 +414,13 @@ export default definePlugin({
     requiresRestart: false,
     start() {
         clearRowHacks();
-        observer = new MutationObserver(() => scheduleMount());
-        observer.observe(document.body, { childList: true, subtree: true });
-        interval = window.setInterval(mountButtons, 1500);
-        mountButtons();
+        SelectedChannelStore.addChangeListener(syncCallUi);
+        syncCallUi();
     },
     stop() {
-        observer?.disconnect();
-        observer = undefined;
-        if (interval) window.clearInterval(interval);
-        interval = undefined;
-        document.getElementById("telinha-account-btn")?.remove();
-        document.getElementById(ACTIONS_BUTTON_ID)?.remove();
-        document.getElementById(STATUS_BUTTON_ID)?.remove();
-        document.getElementById(BAR_GROUP_ID)?.remove();
-        document.getElementById(STYLE_ID)?.remove();
+        SelectedChannelStore.removeChangeListener(syncCallUi);
+        stopWatching();
+        unmountButtons();
         document.querySelector(`[${VOICE_ROW_ATTR}]`)?.removeAttribute(VOICE_ROW_ATTR);
     },
 });

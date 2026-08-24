@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { PLAYOUT_DELAY_MS } from "./playout";
 
 const WORKLET_SOURCE = `
@@ -122,6 +123,49 @@ async function disableAudioProcessing(track: MediaStreamTrack) {
     } as MediaTrackConstraints);
   } catch {
   }
+}
+
+export function pcmBytesToFloat32(bytes: ArrayBuffer | Uint8Array): Float32Array {
+  const raw = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
+  if (raw.byteOffset % 4 === 0 && raw.byteLength % 4 === 0) {
+    return new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+  }
+  const copy = raw.slice();
+  return new Float32Array(copy.buffer);
+}
+
+export function postShareAudio(port: MessagePort | null | undefined, bytes: ArrayBuffer | Uint8Array) {
+  if (!port) return;
+  const samples = pcmBytesToFloat32(bytes);
+  try {
+    port.postMessage(samples, [samples.buffer]);
+  } catch {
+    port.postMessage(samples);
+  }
+}
+
+export function createShareAudioPump(getPort: () => MessagePort | null | undefined) {
+  let pumping = false;
+  let queued = false;
+  return async () => {
+    if (pumping) {
+      queued = true;
+      return;
+    }
+    pumping = true;
+    try {
+      do {
+        queued = false;
+        try {
+          const bytes = await invoke<ArrayBuffer | Uint8Array>("read_share_audio");
+          postShareAudio(getPort(), bytes);
+        } catch {
+        }
+      } while (queued);
+    } finally {
+      pumping = false;
+    }
+  };
 }
 
 function pullInterleaved(queue: Float32Array[], needed: number): Float32Array {

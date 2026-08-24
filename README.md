@@ -10,7 +10,7 @@ Complemento de compartilhamento de tela para usar junto com o Discord no Windows
 4. Os outros abrem o Telinha, colam o código e entram.
 5. Qualquer pessoa pode clicar **Compartilhar tela** (ou `Ctrl+Shift+S`).
 
-O vídeo usa `getDisplayMedia` do Chromium (GPU + H.264), o mesmo caminho do Discord. Se o Windows recusar, cai no JPEG nativo. No seletor dá para incluir áudio e escolher H.264 ou VP8 no envio.
+O Telinha abre diretamente o seletor seguro do Windows uma única vez. O vídeo usa `getDisplayMedia` do Chromium para capturar e codificar pela GPU, sem passar pelo pipeline JPEG. O áudio usa o loopback por processo do Windows para excluir a árvore do Discord e evitar que a call volte na live.
 
 O vídeo vai do PC de quem compartilha direto para os amigos (WebRTC). O servidor só troca o código da sala e o handshake.
 

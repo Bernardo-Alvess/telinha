@@ -318,6 +318,7 @@ pub fn stop_share_capture() {
     if let Ok(mut frame) = LATEST_FRAME.lock() {
         *frame = None;
     }
+    audio::clear_share_audio();
 }
 
 #[tauri::command]
@@ -342,17 +343,8 @@ pub fn set_window_layout(app: AppHandle, layout: String) -> Result<(), String> {
             let _ = window.set_always_on_top(false);
             apply_window_size(&window, 960.0, 540.0, 1440.0, 810.0)?;
         }
-        "host" => {
-            apply_window_size(&window, 400.0, 300.0, 480.0, 420.0)?;
-        }
-        "home" => {
-            apply_window_size(&window, 360.0, 420.0, 400.0, 500.0)?;
-        }
-        "picker" => {
-            apply_window_size(&window, 640.0, 480.0, 760.0, 620.0)?;
-        }
         _ => {
-            apply_window_size(&window, 380.0, 440.0, 440.0, 560.0)?;
+            apply_window_size(&window, 640.0, 500.0, 720.0, 580.0)?;
         }
     }
     Ok(())

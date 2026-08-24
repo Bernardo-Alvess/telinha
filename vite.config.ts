@@ -1,12 +1,12 @@
 /// <reference types="vitest/config" />
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
-function assertProductionApiUrl() {
-  if (process.env.VITE_ALLOW_LOCAL_API === "1") {
+function assertProductionApiUrl(env: Record<string, string>) {
+  if (env.VITE_ALLOW_LOCAL_API === "1") {
     return;
   }
-  const api = process.env.VITE_API_URL ?? "";
+  const api = env.VITE_API_URL ?? "";
   if (!api || /localhost|127\.0\.0\.1/i.test(api)) {
     throw new Error(
       "Defina VITE_API_URL com a URL pública do servidor para o build de produção, ou VITE_ALLOW_LOCAL_API=1.",
@@ -15,8 +15,9 @@ function assertProductionApiUrl() {
 }
 
 export default defineConfig(({ command, mode }) => {
+  const env = loadEnv(mode, process.cwd(), "VITE_");
   if (command === "build" && mode === "production") {
-    assertProductionApiUrl();
+    assertProductionApiUrl(env);
   }
 
   return {

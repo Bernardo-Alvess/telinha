@@ -84,6 +84,7 @@ pub fn run() {
             gpu::gpu_encode_info,
             capture::start_share_capture,
             capture::read_share_frame,
+            audio::read_share_audio,
             capture::stop_share_capture,
             capture::set_window_layout
         ])

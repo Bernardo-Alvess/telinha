@@ -30,7 +30,7 @@ base64 = "0.22"
 wasapi = "0.19"
 webview2-com = "0.38"
 sha2 = "0.10"
-windows = { version = "0.61", features = ["Win32_Graphics_Dxgi"] }
+windows = { version = "0.61", features = ["Win32_Graphics_Dxgi", "Win32_System_Diagnostics_ToolHelp"] }
 
 [profile.release]
 codegen-units = 1

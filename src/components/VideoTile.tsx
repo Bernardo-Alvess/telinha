@@ -14,6 +14,7 @@ export function VideoTile({ stream, active, expandable, onSelect }: VideoTilePro
     const element = videoRef.current;
     if (!element) return;
     element.srcObject = stream;
+    void element.play().catch(() => undefined);
     return () => {
       element.srcObject = null;
     };

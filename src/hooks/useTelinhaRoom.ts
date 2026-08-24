@@ -5,8 +5,7 @@ import { signalingUrl, type RoomSession } from "../lib/api";
 import { buildIceServers } from "../lib/ice";
 import { playStreamStarted, playViewerJoined } from "../lib/sounds";
 import { startDisplayMediaShare } from "../media/displayShare";
-import { createShareAudioTrack } from "../media/shareAudio";
-import { createVideoSink, decodeShareJpeg } from "../media/shareVideo";
+import { createShareAudioPump, createShareAudioTrack } from "../media/shareAudio";
 
 export enum ConnectionState {
   Disconnected = "disconnected",
@@ -31,20 +30,10 @@ export interface RoomPerson {
 export interface ShareQuality {
   fps: number;
   maxWidth: number;
+  maxHeight?: number;
+  maxBitrate?: number;
   includeAudio: boolean;
   useGpuEncode: boolean;
-}
-
-interface ShareFrame {
-  seq: number;
-  width: number;
-  height: number;
-}
-
-interface ShareAudio {
-  samples: number[];
-  sampleRate: number;
-  channels: number;
 }
 
 interface SignalMessage {
@@ -63,7 +52,7 @@ interface SignalMessage {
 
 const ICE_SERVERS: RTCIceServer[] = buildIceServers(import.meta.env);
 
-const VIDEO_MAX_BITRATE = 16_000_000;
+const VIDEO_MAX_BITRATE = 10_000_000;
 const AUDIO_MAX_BITRATE = 320_000;
 
 export function useTelinhaRoom(session: RoomSession | null) {
@@ -73,13 +62,14 @@ export function useTelinhaRoom(session: RoomSession | null) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
   const peopleRef = useRef<Map<string, RoomPerson>>(new Map());
-  const videoSinkCloseRef = useRef<(() => void) | null>(null);
   const unlistensRef = useRef<UnlistenFn[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioNodeRef = useRef<AudioNode | null>(null);
   const audioPortRef = useRef<MessagePort | null>(null);
   const sharingRef = useRef(false);
   const useGpuEncodeRef = useRef(true);
+  const shareFpsRef = useRef(60);
+  const shareBitrateRef = useRef(VIDEO_MAX_BITRATE);
   const stopShareRef = useRef<() => Promise<void>>(async () => undefined);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>(
@@ -158,15 +148,19 @@ export function useTelinhaRoom(session: RoomSession | null) {
     for (const sender of peer.getSenders()) {
       const kind = sender.track?.kind;
       if (kind !== "video" && kind !== "audio") continue;
-      const maxBitrate = kind === "video" ? VIDEO_MAX_BITRATE : AUDIO_MAX_BITRATE;
+      const maxBitrate = kind === "video" ? shareBitrateRef.current : AUDIO_MAX_BITRATE;
       const params = sender.getParameters();
       params.degradationPreference = "maintain-framerate";
+      const encoding = {
+        maxBitrate,
+        ...(kind === "video" ? { priority: "high" as const } : {}),
+      };
       params.encodings = params.encodings?.length
-        ? params.encodings.map((encoding) => ({
+        ? params.encodings.map((current) => ({
+            ...current,
             ...encoding,
-            maxBitrate,
           }))
-        : [{ maxBitrate }];
+        : [encoding];
       try {
         await sender.setParameters(params);
       } catch {
@@ -208,6 +202,8 @@ export function useTelinhaRoom(session: RoomSession | null) {
       };
 
       peer.ontrack = (event) => {
+        markVideoMotion(event.track);
+        tuneIncomingVideo(event.receiver);
         const [stream] = event.streams;
         if (stream) {
           remoteStreamsRef.current.set(peerId, stream);
@@ -270,8 +266,6 @@ export function useTelinhaRoom(session: RoomSession | null) {
       }
     }
     localStreamRef.current = null;
-    videoSinkCloseRef.current?.();
-    videoSinkCloseRef.current = null;
 
     audioNodeRef.current?.disconnect();
     audioNodeRef.current = null;
@@ -433,6 +427,10 @@ export function useTelinhaRoom(session: RoomSession | null) {
         const peer = getOrCreatePeer(message.from, localId, localName);
         await peer.setRemoteDescription({ type: "offer", sdp: message.sdp });
         await flushIce(message.from, peer);
+        for (const receiver of peer.getReceivers()) {
+          markVideoMotion(receiver.track);
+          tuneIncomingVideo(receiver);
+        }
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
         sendSignal({ type: "answer", to: message.from, sdp: answer.sdp });
@@ -444,6 +442,10 @@ export function useTelinhaRoom(session: RoomSession | null) {
         if (!peer) return;
         await peer.setRemoteDescription({ type: "answer", sdp: message.sdp });
         await flushIce(message.from, peer);
+        for (const receiver of peer.getReceivers()) {
+          markVideoMotion(receiver.track);
+          tuneIncomingVideo(receiver);
+        }
         await applyBitrate(peer);
         return;
       }
@@ -539,17 +541,11 @@ export function useTelinhaRoom(session: RoomSession | null) {
       await cleanupNativeShare();
       setError(null);
       useGpuEncodeRef.current = quality.useGpuEncode;
+      shareFpsRef.current = quality.fps;
+      shareBitrateRef.current = quality.maxBitrate ?? VIDEO_MAX_BITRATE;
 
       try {
-        const stream =
-          (await startDisplayMediaShare(quality, sourceId)) ??
-          (await startNativeShare(sourceId, quality, {
-            unlistensRef,
-            videoSinkCloseRef,
-            audioContextRef,
-            audioNodeRef,
-            audioPortRef,
-          }));
+        const stream = await startDisplayMediaShare(quality, sourceId);
 
         if (quality.includeAudio && stream.getAudioTracks().length === 0) {
           await attachLoopbackAudio(sourceId, {
@@ -656,11 +652,10 @@ async function attachLoopbackAudio(
   refs.audioContextRef.current = audio.context;
   refs.audioNodeRef.current = audio.node;
   refs.audioPortRef.current = audio.port ?? null;
-  refs.unlistensRef.current.push(
-    await listen<ShareAudio>("share-audio", (event) => {
-      refs.audioPortRef.current?.postMessage(Float32Array.from(event.payload.samples));
-    }),
-  );
+  const pumpAudio = createShareAudioPump(() => refs.audioPortRef.current);
+  refs.unlistensRef.current.push(await listen("share-audio", () => {
+    void pumpAudio();
+  }));
   await invoke("start_share_capture", {
     id: sourceId,
     fps: 15,
@@ -673,105 +668,40 @@ async function attachLoopbackAudio(
   }
 }
 
-async function startNativeShare(
-  sourceId: string,
-  quality: ShareQuality,
-  refs: AudioShareRefs & { videoSinkCloseRef: MutableRefObject<(() => void) | null> },
-): Promise<MediaStream> {
-  const sink = createVideoSink(quality.fps);
-  refs.videoSinkCloseRef.current = sink.close;
-
-  let audioTrack: MediaStreamTrack | null = null;
-  if (quality.includeAudio) {
-    const audio = await createShareAudioTrack();
-    if (audio) {
-      audioTrack = audio.track;
-      refs.audioContextRef.current = audio.context;
-      refs.audioNodeRef.current = audio.node;
-      refs.audioPortRef.current = audio.port ?? null;
-      refs.unlistensRef.current.push(
-        await listen<ShareAudio>("share-audio", (event) => {
-          refs.audioPortRef.current?.postMessage(Float32Array.from(event.payload.samples));
-        }),
-      );
-    }
+function markVideoMotion(track: MediaStreamTrack | null) {
+  if (track && track.kind === "video") {
+    track.contentHint = "motion";
   }
+}
 
-  let sawFirstFrame = false;
-  let resolveFirst: (() => void) | undefined;
-  let rejectFirst: ((error: Error) => void) | undefined;
-  const firstFrame = new Promise<void>((resolve, reject) => {
-    resolveFirst = resolve;
-    rejectFirst = reject;
-  });
-  const timeout = window.setTimeout(() => {
-    if (!sawFirstFrame) {
-      rejectFirst?.(new Error("Nenhum quadro da tela chegou. Tente outra fonte."));
+function tuneIncomingVideo(receiver: RTCRtpReceiver) {
+  if (receiver.track?.kind !== "video") return;
+  try {
+    if ("jitterBufferTarget" in receiver) {
+      (receiver as RTCRtpReceiver & { jitterBufferTarget: number | null }).jitterBufferTarget = 80;
     }
-  }, 5000);
-
-  let pumping = false;
-  let queued = false;
-  const pumpFrame = async () => {
-    if (pumping) {
-      queued = true;
-      return;
-    }
-    pumping = true;
-    try {
-      do {
-        queued = false;
-        try {
-          const bytes = await invoke<ArrayBuffer | Uint8Array>("read_share_frame");
-          const bitmap = await decodeShareJpeg(bytes);
-          await sink.push(bitmap);
-          if (!sawFirstFrame) {
-            sawFirstFrame = true;
-            window.clearTimeout(timeout);
-            resolveFirst?.();
-          }
-        } catch {
-        }
-      } while (queued);
-    } finally {
-      pumping = false;
-    }
-  };
-
-  refs.unlistensRef.current.push(
-    await listen<ShareFrame>("share-frame", () => {
-      void pumpFrame();
-    }),
-  );
-
-  await invoke("start_share_capture", {
-    id: sourceId,
-    fps: quality.fps,
-    maxWidth: quality.maxWidth,
-    includeAudio: quality.includeAudio,
-    includeVideo: true,
-  });
-
-  await firstFrame;
-
-  const stream = new MediaStream([sink.track]);
-  if (audioTrack) {
-    stream.addTrack(audioTrack);
+  } catch {
   }
-  return stream;
+}
+
+function codecRank(codec: { mimeType: string; sdpFmtpLine?: string }, wanted: RegExp): number {
+  if (wanted.test(codec.mimeType)) {
+    const line = `${codec.sdpFmtpLine ?? ""}`;
+    if (/profile-level-id=64/i.test(line)) return 0;
+    if (/profile-level-id=4d/i.test(line)) return 1;
+    return 2;
+  }
+  if (/rtx|red|ulpfec/i.test(codec.mimeType)) return 20;
+  return 10;
 }
 
 function preferVideoCodecs(peer: RTCPeerConnection, useGpuEncode: boolean) {
   const capabilities = RTCRtpSender.getCapabilities("video");
   if (!capabilities) return;
   const wanted = useGpuEncode ? /h264/i : /vp8/i;
-  const preferred = [
-    ...capabilities.codecs.filter((codec) => wanted.test(codec.mimeType)),
-    ...capabilities.codecs.filter(
-      (codec) => !wanted.test(codec.mimeType) && !/rtx|red|ulpfec/i.test(codec.mimeType),
-    ),
-    ...capabilities.codecs.filter((codec) => /rtx|red|ulpfec/i.test(codec.mimeType)),
-  ];
+  const preferred = [...capabilities.codecs].sort(
+    (left, right) => codecRank(left, wanted) - codecRank(right, wanted),
+  );
   for (const transceiver of peer.getTransceivers()) {
     if (transceiver.sender.track?.kind === "video" || transceiver.receiver.track?.kind === "video") {
       try {

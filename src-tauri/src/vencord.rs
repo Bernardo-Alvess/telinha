@@ -41,33 +41,86 @@ fn install_sync(resource_dir: &Path) -> Result<VencordInstall, String> {
 
     #[cfg(windows)]
     {
-        let bundled_dist = resource_dir.join("vencord-dist");
-        if !bundled_dist.join("renderer.js").is_file() {
-            return Err("O instalador do Telinha não contém o Vencord compilado.".into());
-        }
+        let bundled_dist = find_vencord_dist(resource_dir).ok_or_else(|| {
+            "Não achei o plugin do Vencord neste executável. Use o Telinha instalado pelo setup, ou rode o .exe de dentro da pasta completa do app — copiar só o .exe deixa os arquivos do plugin para trás.".to_string()
+        })?;
+        let plugin_dir = find_userplugin_dir(resource_dir);
 
         let vencord_root = roaming_dir()?.join("Vencord");
         let installed_dist = vencord_root.join("dist");
-        copy_bundle(&bundled_dist, &installed_dist)?;
-        enable_telinha(&vencord_root)?;
-
         let installer = installer_path()?;
         download_installer(&installer)?;
         inject_vencord(&installer, &vencord_root)?;
-
         copy_bundle(&bundled_dist, &installed_dist)?;
+        if let Some(plugin_dir) = plugin_dir {
+            install_userplugin(&plugin_dir, &vencord_root)?;
+        }
         enable_telinha(&vencord_root)?;
 
         Ok(VencordInstall {
-            dest: installed_dist.to_string_lossy().into_owned(),
-            message:
-                "Pronto. O Vencord e o botão Telinha foram instalados. Abra o Discord novamente."
-                    .into(),
+            dest: vencord_root.to_string_lossy().into_owned(),
+            message: "Pronto. Feche o Discord pela bandeja e abra de novo — o botão Telinha fica na barra da call.".into(),
         })
     }
 }
 
+#[cfg(windows)]
+fn find_vencord_dist(resource_dir: &Path) -> Option<PathBuf> {
+    bundled_candidates(resource_dir)
+        .into_iter()
+        .map(|root| root.join("vencord-dist"))
+        .chain(bundled_candidates(resource_dir))
+        .find(|dir| dir.join("renderer.js").is_file())
+}
+
+#[cfg(windows)]
+fn find_userplugin_dir(resource_dir: &Path) -> Option<PathBuf> {
+    bundled_candidates(resource_dir)
+        .into_iter()
+        .map(|root| root.join("vencord-plugin").join("telinha"))
+        .find(|dir| dir.is_dir())
+}
+
+#[cfg(windows)]
+fn bundled_candidates(resource_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![
+        resource_dir.to_path_buf(),
+        resource_dir.join("resources"),
+    ];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.to_path_buf());
+            dirs.push(dir.join("resources"));
+            if let Some(parent) = dir.parent() {
+                dirs.push(parent.to_path_buf());
+                dirs.push(parent.join("resources"));
+            }
+        }
+    }
+    dirs
+}
+
+#[cfg(windows)]
 fn copy_bundle(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let source = entry.path();
+        if source.is_file() {
+            fs::copy(&source, to.join(entry.file_name()))
+                .map_err(|error| format!("Não consegui copiar {}: {error}", source.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn install_userplugin(plugin_dir: &Path, vencord_root: &Path) -> Result<(), String> {
+    copy_dir(plugin_dir, &vencord_root.join("src").join("userplugins").join("telinha"))
+}
+
+#[cfg(windows)]
+fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|error| error.to_string())?;
     for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;

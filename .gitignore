@@ -21,6 +21,7 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+!.env.production
 server/.env
 server/.env.*
 !server/.env.example

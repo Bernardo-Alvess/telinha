@@ -145,9 +145,9 @@ export function HomeScreen({ onJoin, error: incomingError, invite, joining }: Ho
           <div className="notice">
             <strong>Instalar o botão no Discord?</strong>
             <p>
-              Isso baixa o instalador oficial do Vencord (v1.4.0, com hash verificado), altera a
-              pasta do Vencord no AppData e modifica o cliente do Discord. Pode violar os termos
-              do Discord.
+              Isso instala o botão Telinha no Discord. Feche o Discord pela bandeja depois,
+              inclusive o ícone escondido. Se o Discord atualizar sozinho e o botão sumir,
+              clique aqui de novo. Pode violar os termos do Discord.
             </p>
             <div className="notice-actions">
               <button
