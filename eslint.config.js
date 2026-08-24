@@ -23,6 +23,7 @@ export default tseslint.config(
       "react-hooks/refs": "off",
       "react-hooks/set-state-in-effect": "off",
       "react-refresh/only-export-components": "off",
+      "no-empty": ["error", { allowEmptyCatch: true }],
       "@typescript-eslint/no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
