@@ -1,45 +1,227 @@
+use serde::Serialize;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use tauri::Manager;
 
-const PLUGIN_SOURCE: &str = include_str!("../../vencord-plugin/telinha/index.ts");
+#[cfg(windows)]
+const INSTALLER_URL: &str =
+    "https://github.com/Vencord/Installer/releases/download/v1.4.0/VencordInstallerCli.exe";
+#[cfg(windows)]
+const INSTALLER_SHA256: &str = "466d2a0be1f380ddffed052df3cc132125fa34dc1af29312e14f13f358c8d2a2";
 
-fn default_candidates() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        let home = PathBuf::from(home);
-        dirs.push(home.join("Vencord"));
-        dirs.push(home.join("Documents").join("Vencord"));
-        dirs.push(home.join("source").join("Vencord"));
-        dirs.push(home.join("code").join("Vencord"));
-        dirs.push(home.join("dev").join("Vencord"));
-    }
-    dirs
-}
-
-fn write_plugin(vencord_root: &Path) -> Result<PathBuf, String> {
-    let dest_dir = vencord_root.join("src").join("userplugins").join("telinha");
-    if !vencord_root.join("src").is_dir() {
-        return Err("Essa pasta não parece um Vencord compilado da source (falta src/).".into());
-    }
-    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
-    let dest = dest_dir.join("index.ts");
-    fs::write(&dest, PLUGIN_SOURCE).map_err(|e| e.to_string())?;
-    Ok(dest)
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VencordInstall {
+    pub dest: String,
+    pub message: String,
 }
 
 #[tauri::command]
-pub fn install_vencord_plugin(vencord_path: Option<String>) -> Result<String, String> {
-    if let Some(path) = vencord_path.filter(|value| !value.trim().is_empty()) {
-        let dest = write_plugin(Path::new(path.trim()))?;
-        return Ok(dest.to_string_lossy().into_owned());
+pub async fn install_vencord_plugin(
+    app: tauri::AppHandle,
+    _vencord_path: Option<String>,
+) -> Result<VencordInstall, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || install_sync(&resource_dir))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn install_sync(resource_dir: &Path) -> Result<VencordInstall, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = resource_dir;
+        return Err("A instalação automática do Vencord está disponível no Windows.".into());
     }
 
-    for root in default_candidates() {
-        if root.join("src").is_dir() {
-            let dest = write_plugin(&root)?;
-            return Ok(dest.to_string_lossy().into_owned());
+    #[cfg(windows)]
+    {
+        let bundled_dist = resource_dir.join("vencord-dist");
+        if !bundled_dist.join("renderer.js").is_file() {
+            return Err("O instalador do Telinha não contém o Vencord compilado.".into());
+        }
+
+        let vencord_root = roaming_dir()?.join("Vencord");
+        let installed_dist = vencord_root.join("dist");
+        copy_bundle(&bundled_dist, &installed_dist)?;
+        enable_telinha(&vencord_root)?;
+
+        let installer = installer_path()?;
+        download_installer(&installer)?;
+        inject_vencord(&installer, &vencord_root)?;
+
+        copy_bundle(&bundled_dist, &installed_dist)?;
+        enable_telinha(&vencord_root)?;
+
+        Ok(VencordInstall {
+            dest: installed_dist.to_string_lossy().into_owned(),
+            message:
+                "Pronto. O Vencord e o botão Telinha foram instalados. Abra o Discord novamente."
+                    .into(),
+        })
+    }
+}
+
+fn copy_bundle(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let source = entry.path();
+        if source.is_file() {
+            fs::copy(&source, to.join(entry.file_name()))
+                .map_err(|error| format!("Não consegui copiar {}: {error}", source.display()))?;
         }
     }
+    Ok(())
+}
 
-    Err("Não achei um Vencord da source. Passe a pasta do clone ou siga vencord-plugin/README.md.".into())
+fn enable_telinha(vencord_root: &Path) -> Result<(), String> {
+    let settings_dir = vencord_root.join("settings");
+    let settings_path = settings_dir.join("settings.json");
+    fs::create_dir_all(&settings_dir).map_err(|error| error.to_string())?;
+
+    let mut settings: Value = if settings_path.is_file() {
+        fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str(&contents).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+
+    let root = settings
+        .as_object_mut()
+        .ok_or("As configurações do Vencord estão inválidas.")?;
+    root.insert("autoUpdate".into(), Value::Bool(false));
+
+    let plugins = root
+        .entry("plugins")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or("A lista de plugins do Vencord está inválida.")?;
+    plugins.insert("Telinha".into(), json!({ "enabled": true }));
+
+    let encoded = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
+    fs::write(settings_path, encoded).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(windows)]
+fn file_matches_installer(path: &Path) -> bool {
+    fs::read(path)
+        .ok()
+        .is_some_and(|bytes| sha256_hex(&bytes).eq_ignore_ascii_case(INSTALLER_SHA256))
+}
+
+#[cfg(windows)]
+fn download_installer(destination: &Path) -> Result<(), String> {
+    if destination.is_file() && file_matches_installer(destination) {
+        return Ok(());
+    }
+    if destination.is_file() {
+        let _ = fs::remove_file(destination);
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = destination.with_extension("download");
+    let _ = fs::remove_file(&temporary);
+
+    run_hidden(
+        "curl.exe",
+        &[
+            "-fL",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "20",
+            "-o",
+            temporary.to_str().ok_or("Caminho temporário inválido.")?,
+            INSTALLER_URL,
+        ],
+        &[],
+    )
+    .map_err(|error| format!("Não consegui baixar o instalador oficial do Vencord. {error}"))?;
+
+    if !file_matches_installer(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err("O instalador do Vencord não passou na verificação de integridade.".into());
+    }
+
+    let _ = fs::remove_file(destination);
+    fs::rename(temporary, destination).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn inject_vencord(installer: &Path, vencord_root: &Path) -> Result<(), String> {
+    let root = vencord_root.to_string_lossy().into_owned();
+    run_hidden(
+        installer
+            .to_str()
+            .ok_or("Caminho do instalador inválido.")?,
+        &["-install", "-branch", "auto"],
+        &[
+            ("VENCORD_USER_DATA_DIR", root.as_str()),
+            ("VENCORD_DEV_INSTALL", "1"),
+        ],
+    )
+    .map_err(|error| format!("O instalador oficial do Vencord falhou. {error}"))
+}
+
+#[cfg(windows)]
+fn run_hidden(program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let output = Command::new(program)
+        .args(args)
+        .envs(envs.iter().copied())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("Falha ao executar {program}: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .find(|text| !text.is_empty())
+        .unwrap_or("erro desconhecido");
+    Err(detail.to_string())
+}
+
+#[cfg(windows)]
+fn roaming_dir() -> Result<PathBuf, String> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or("Não encontrei a pasta AppData do Windows.".into())
+}
+
+#[cfg(windows)]
+fn installer_path() -> Result<PathBuf, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("TEMP"))
+        .map(PathBuf::from)
+        .ok_or("Não encontrei a pasta temporária do Windows.")?;
+    Ok(base
+        .join("Telinha")
+        .join("installer")
+        .join("VencordInstallerCli.exe"))
 }

@@ -1,7 +1,11 @@
 mod audio;
 mod capture;
 mod discord;
+mod gpu;
 mod vencord;
+
+#[cfg(windows)]
+mod webview_permissions;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -14,9 +18,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 #[tauri::command]
 fn copy_to_clipboard(text: String, app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    app.clipboard()
-        .write_text(text)
-        .map_err(|e| e.to_string())
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -62,21 +64,22 @@ pub fn run() {
             vencord::install_vencord_plugin,
             discord::set_discord_presence,
             capture::list_share_sources,
+            capture::resolve_share_source,
+            gpu::gpu_encode_info,
             capture::start_share_capture,
+            capture::read_share_frame,
             capture::stop_share_capture,
             capture::set_window_layout
         ])
-        .on_window_event(|window, event| {
-            match event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
-                tauri::WindowEvent::Focused(focused) => {
-                    let _ = window.set_always_on_top(*focused);
-                }
-                _ => {}
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                let _ = window.hide();
             }
+            tauri::WindowEvent::Focused(focused) => {
+                let _ = window.set_always_on_top(*focused);
+            }
+            _ => {}
         })
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "Mostrar Telinha", true, None::<&str>)?;
@@ -116,15 +119,15 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            let shortcut =
-                Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
+            let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
             let _ = app.global_shortcut().register(shortcut);
 
             #[cfg(desktop)]
             {
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
-                    let urls: Vec<String> = event.urls().iter().map(|url| url.to_string()).collect();
+                    let urls: Vec<String> =
+                        event.urls().iter().map(|url| url.to_string()).collect();
                     let _ = handle.emit("telinha-open-url", urls);
                     if let Some(window) = handle.get_webview_window("main") {
                         let _ = window.show();
@@ -138,6 +141,15 @@ pub fn run() {
             }
 
             discord::start_presence_loop();
+
+            if let Some(window) = app.get_webview_window("main") {
+                #[cfg(windows)]
+                {
+                    let _ = window.with_webview(|webview| {
+                        webview_permissions::allow_media_capture(&webview);
+                    });
+                }
+            }
 
             Ok(())
         })

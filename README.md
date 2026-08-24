@@ -23,7 +23,7 @@ O vídeo vai do PC de quem compartilha direto para os amigos (WebRTC). O servido
 cp .env.example .env
 ```
 
-Para desenvolvimento local, `VITE_API_URL=http://localhost:3001`. No `.exe` que vai para os amigos, use a URL pública do servidor (`https://telinha-server.onrender.com`).
+Para desenvolvimento local, `VITE_API_URL=http://localhost:3001`. No `.exe` que vai para os amigos, o build de produção exige a URL pública do servidor (`https://telinha-server.onrender.com`). Sem TURN (`VITE_TURN_URL`) o WebRTC usa só STUN e pode falhar em redes restritas. No servidor, defina `WS_PUBLIC_URL` para não depender do header `Host`.
 
 ## Desenvolvimento
 

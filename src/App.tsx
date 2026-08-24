@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { joinRoom, type RoomSession } from "./api";
+import { enterRoom, type RoomSession } from "./api";
 import { HomeScreen } from "./components/HomeScreen";
 import { RoomScreen } from "./components/RoomScreen";
 import { actionFromUrls } from "./deepLink";
@@ -9,15 +9,25 @@ import "./App.css";
 
 const NAME_KEY = "telinha-display-name";
 
-function displayName(): string {
-  return localStorage.getItem(NAME_KEY)?.trim() || "Amigo";
+interface PendingInvite {
+  code: string;
+  name?: string;
+}
+
+function displayName(override?: string): string {
+  return override?.trim() || localStorage.getItem(NAME_KEY)?.trim() || "Amigo";
 }
 
 function App() {
   const [session, setSession] = useState<RoomSession | null>(null);
   const [pendingCode, setPendingCode] = useState<string | null>(null);
+  const [pendingInvite, setPendingInvite] = useState<PendingInvite | null>(null);
   const [pendingShare, setPendingShare] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const sessionRef = useRef(session);
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
 
   useEffect(() => {
     if (!session) {
@@ -31,11 +41,13 @@ function App() {
       if (!action) return;
       if (action.action === "join") {
         setJoinError(null);
-        setPendingCode(action.code);
+        setPendingInvite({ code: action.code, name: action.name });
         void invoke("show_main_window").catch(() => undefined);
       }
       if (action.action === "share") {
-        setPendingShare(true);
+        if (sessionRef.current) {
+          setPendingShare(true);
+        }
         void invoke("show_main_window").catch(() => undefined);
       }
       if (action.action === "open") {
@@ -87,7 +99,7 @@ function App() {
   useEffect(() => {
     if (!pendingCode) return;
     let cancelled = false;
-    void joinRoom(pendingCode, displayName())
+    void enterRoom(pendingCode, displayName())
       .then((next) => {
         if (!cancelled) {
           setSession(next);
@@ -105,21 +117,56 @@ function App() {
     };
   }, [pendingCode]);
 
+  function acceptInvite(invite: PendingInvite) {
+    if (invite.name) {
+      localStorage.setItem(NAME_KEY, invite.name.slice(0, 24));
+    }
+    setPendingInvite(null);
+    setJoinError(null);
+    setSession(null);
+    setPendingShare(false);
+    setPendingCode(invite.code);
+  }
+
+  const inviteBanner = pendingInvite ? (
+    <div className="notice">
+      <strong>Entrar na sala {pendingInvite.code}?</strong>
+      <p>
+        {session
+          ? `Você já está em ${session.code}. Confirmar troca para a sala ${pendingInvite.code} como ${displayName(pendingInvite.name)}.`
+          : `Abrir a Telinha como ${displayName(pendingInvite.name)}.`}
+      </p>
+      <div className="notice-actions">
+        <button type="button" className="btn btn-secondary" onClick={() => setPendingInvite(null)}>
+          Agora não
+        </button>
+        <button type="button" className="btn btn-primary" onClick={() => acceptInvite(pendingInvite)}>
+          Entrar
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   if (session) {
     return (
-      <RoomScreen
-        session={session}
-        onLeave={() => {
-          setSession(null);
-          setPendingShare(false);
-        }}
-        openPicker={pendingShare}
-        onPickerOpened={() => setPendingShare(false)}
-      />
+      <div className="app-shell">
+        {inviteBanner ? <div className="notice-overlay">{inviteBanner}</div> : null}
+        <RoomScreen
+          session={session}
+          onLeave={() => {
+            setSession(null);
+            setPendingShare(false);
+          }}
+          openPicker={pendingShare}
+          onPickerOpened={() => setPendingShare(false)}
+        />
+      </div>
     );
   }
 
-  return <HomeScreen onJoin={setSession} error={joinError} />;
+  return (
+    <HomeScreen onJoin={setSession} error={joinError} invite={inviteBanner} />
+  );
 }
 
 export default App;

@@ -23,6 +23,9 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
     return Number.isFinite(stored) ? Math.min(100, Math.max(0, stored)) : 100;
   });
   const [chromeVisible, setChromeVisible] = useState(true);
+  const [watchFullscreen, setWatchFullscreen] = useState(() => {
+    return localStorage.getItem("telinha-watch-fullscreen") !== "0";
+  });
   const hideTimer = useRef<number | null>(null);
   const watchAudioRef = useRef<HTMLMediaElement | null>(null);
   const {
@@ -48,12 +51,12 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
   const localShare = screenShares.find((share) => share.participantIdentity === localId);
   const watchingShare = remoteShares.find((share) => share.participantIdentity === watchingId) ?? null;
   const watching = Boolean(watchingShare) && !pickerOpen;
-  const hosting = isSharing && !pickerOpen && !watching;
+  const hosting = isSharing && !watching && !pickerOpen;
 
   useEffect(() => {
     if (openPicker) {
-      setPickerOpen(true);
       onPickerOpened?.();
+      setPickerOpen(true);
     }
   }, [openPicker, onPickerOpened]);
 
@@ -69,9 +72,21 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
   }, [watchingId, screenShares, localId]);
 
   useEffect(() => {
-    const layout = pickerOpen ? "picker" : watching ? "watch" : hosting ? "host" : "lobby";
+    const layout = pickerOpen
+      ? "picker"
+      : watching
+      ? watchFullscreen
+        ? "watch"
+        : "watch-window"
+      : hosting
+        ? "host"
+        : "lobby";
     void invoke("set_window_layout", { layout }).catch(() => undefined);
-  }, [pickerOpen, watching, hosting]);
+  }, [pickerOpen, watching, hosting, watchFullscreen]);
+
+  useEffect(() => {
+    localStorage.setItem("telinha-watch-fullscreen", watchFullscreen ? "1" : "0");
+  }, [watchFullscreen]);
 
   useEffect(() => {
     const stream = watchingShare?.stream;
@@ -142,14 +157,22 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
           setPickerOpen(false);
           return;
         }
+        if (watching && watchFullscreen) {
+          setWatchFullscreen(false);
+          return;
+        }
         if (watching) {
           setWatchingId(null);
         }
       }
+      if (event.key === "F11" && watching) {
+        event.preventDefault();
+        setWatchFullscreen((open) => !open);
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pickerOpen, watching]);
+  }, [pickerOpen, watching, watchFullscreen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,6 +211,7 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
   }
 
   const connected = connectionState === ConnectionState.Connected;
+  const reconnecting = connectionState === ConnectionState.Reconnecting;
   const viewers = participants.filter((person) => !person.isSharing).length;
 
   if (pickerOpen) {
@@ -205,7 +229,7 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
   if (watching && watchingShare) {
     return (
       <div
-        className={`screen room-screen watching ${chromeVisible ? "chrome-on" : "chrome-off"}`}
+        className={`screen room-screen watching ${watchFullscreen ? "watching-full" : "watching-window"} ${chromeVisible ? "chrome-on" : "chrome-off"}`}
       >
         <header className="watch-chrome top">
           <div className="live-badge">Ao vivo · {watchingShare.participantName}</div>
@@ -213,7 +237,7 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
         </header>
 
         <div className="video-area">
-          <VideoTile stream={watchingShare.stream} label={watchingShare.participantName} active />
+          <VideoTile stream={watchingShare.stream} active />
         </div>
 
         {remoteShares.length > 1 && (
@@ -238,6 +262,13 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
             onInteract={() => setChromeVisible(true)}
           />
           <div className="watch-actions">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => setWatchFullscreen((open) => !open)}
+            >
+              {watchFullscreen ? "Diminuir tela" : "Tela cheia"}
+            </button>
             <button
               type="button"
               className="btn btn-share"
@@ -275,7 +306,7 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
 
         <div className="host-preview">
           {localShare ? (
-            <VideoTile stream={localShare.stream} label="Seu preview" active />
+            <VideoTile stream={localShare.stream} active />
           ) : (
             <div className="video-placeholder">
               <p>Preparando preview...</p>
@@ -298,7 +329,7 @@ export function RoomScreen({ session, onLeave, openPicker, onPickerOpened }: Roo
     <div className="screen room-screen lobby-screen">
       <header className="room-header">
         <span className={`status ${connected ? "online" : ""}`}>
-          {connected ? displayName : "Conectando..."}
+          {connected ? displayName : reconnecting ? "Reconectando..." : "Conectando..."}
         </span>
         <button type="button" className="btn btn-ghost" onClick={onLeave}>
           Sair
