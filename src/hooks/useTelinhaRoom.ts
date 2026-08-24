@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { signalingUrl, type RoomSession } from "../lib/api";
+import { enterRoom, pingHealth, signalingUrl, type RoomSession } from "../lib/api";
 import { buildIceServers } from "../lib/ice";
 import { playStreamStarted, playViewerJoined } from "../lib/sounds";
 import { startDisplayMediaShare } from "../media/displayShare";
@@ -61,8 +61,13 @@ const AUDIO_MAX_BITRATE = 320_000;
 const P2P_BLOCKED_MESSAGE =
   "Não foi possível conectar direto. A rede pode estar bloqueando o P2P.";
 const SIGNAL_PING_MS = 20_000;
+const HEALTH_PING_MS = 120_000;
+const MAX_RESEATS = 6;
 
-export function useTelinhaRoom(session: RoomSession | null) {
+export function useTelinhaRoom(
+  session: RoomSession | null,
+  options?: { onSessionRefresh?: (next: RoomSession) => void },
+) {
   const wsRef = useRef<WebSocket | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
@@ -78,6 +83,8 @@ export function useTelinhaRoom(session: RoomSession | null) {
   const shareFpsRef = useRef(60);
   const shareBitrateRef = useRef(VIDEO_MAX_BITRATE);
   const stopShareRef = useRef<() => Promise<void>>(async () => undefined);
+  const reseatCountRef = useRef(0);
+  const onSessionRefresh = options?.onSessionRefresh;
 
   const [connectionState, setConnectionState] = useState<ConnectionState>(
     ConnectionState.Disconnected,
@@ -189,8 +196,11 @@ export function useTelinhaRoom(session: RoomSession | null) {
   const getOrCreatePeer = useCallback(
     (peerId: string, localId: string, localName: string) => {
       const existing = peersRef.current.get(peerId);
-      if (existing && existing.connectionState !== "closed") {
+      if (existing && existing.connectionState !== "closed" && existing.connectionState !== "failed") {
         return existing;
+      }
+      if (existing) {
+        closePeer(peerId);
       }
 
       const peer = new RTCPeerConnection(ICE_CONFIG);
@@ -253,7 +263,7 @@ export function useTelinhaRoom(session: RoomSession | null) {
 
       return peer;
     },
-    [publishShares, sendSignal],
+    [closePeer, publishShares, sendSignal],
   );
 
   const offerTo = useCallback(
@@ -333,7 +343,33 @@ export function useTelinhaRoom(session: RoomSession | null) {
 
     let attempts = 0;
     let fatal = false;
+    let reseating = false;
     let reconnectTimer: number | undefined;
+
+    const refreshSeat = async () => {
+      if (reseating || closed || !onSessionRefresh) {
+        return false;
+      }
+      if (reseatCountRef.current >= MAX_RESEATS) {
+        fatal = true;
+        setConnectionState(ConnectionState.Disconnected);
+        setError("A sala caiu. Saia e peça ao host para abrir de novo, depois entre outra vez.");
+        return false;
+      }
+      reseating = true;
+      reseatCountRef.current += 1;
+      setConnectionState(ConnectionState.Reconnecting);
+      try {
+        const next = await enterRoom(session.code, session.displayName);
+        if (closed) return false;
+        onSessionRefresh(next);
+        return true;
+      } catch (err) {
+        reseating = false;
+        setError(err instanceof Error ? err.message : "Não foi possível voltar para a sala.");
+        return false;
+      }
+    };
 
     const handleMessage = async (event: MessageEvent) => {
       let message: SignalMessage;
@@ -350,7 +386,12 @@ export function useTelinhaRoom(session: RoomSession | null) {
       if (message.type === "error") {
         const text = message.message ?? "Erro na sala";
         setError(text);
-        if (!text.includes("Sala inválida")) {
+        if (text.includes("Sala inválida")) {
+          const refreshed = await refreshSeat();
+          if (refreshed) {
+            return;
+          }
+        } else {
           fatal = true;
           setConnectionState(ConnectionState.Disconnected);
         }
@@ -377,7 +418,10 @@ export function useTelinhaRoom(session: RoomSession | null) {
         publishPeople();
         setConnectionState(ConnectionState.Connected);
         setError(null);
+        reseatCountRef.current = 0;
+        publishShares(localId, localName);
         if (sharingRef.current) {
+          sendSignal({ type: "share-started" });
           await offerToEveryone(localId, localName);
         }
         return;
@@ -516,17 +560,21 @@ export function useTelinhaRoom(session: RoomSession | null) {
         if (pingTimer != null) {
           window.clearInterval(pingTimer);
         }
-        if (closed || fatal) return;
+        if (closed || fatal || reseating) return;
         if (attempts >= 8) {
-          setConnectionState(ConnectionState.Disconnected);
-          setError("A conexão caiu e não foi possível reconectar.");
+          void refreshSeat().then((refreshed) => {
+            if (!refreshed && !closed) {
+              setConnectionState(ConnectionState.Disconnected);
+              setError("A conexão caiu e não foi possível reconectar.");
+            }
+          });
           return;
         }
         setConnectionState(ConnectionState.Reconnecting);
-        const delay = Math.min(1000 * 2 ** attempts, 15_000);
+        const delay = Math.min(1000 * 2 ** attempts, 8_000);
         attempts += 1;
         reconnectTimer = window.setTimeout(() => {
-          if (closed) return;
+          if (closed || reseating) return;
           const next = new WebSocket(signalingUrl(session));
           wsRef.current = next;
           attachSocket(next);
@@ -538,14 +586,23 @@ export function useTelinhaRoom(session: RoomSession | null) {
     wsRef.current = ws;
     attachSocket(ws);
 
+    const healthTimer = window.setInterval(() => {
+      void pingHealth().catch(() => undefined);
+    }, HEALTH_PING_MS);
+    void pingHealth().catch(() => undefined);
+
     return () => {
       closed = true;
+      window.clearInterval(healthTimer);
       if (reconnectTimer != null) {
         window.clearTimeout(reconnectTimer);
       }
-      void cleanupNativeShare();
+      const socket = wsRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "leave" }));
+      }
       closeAllPeers();
-      wsRef.current?.close();
+      socket?.close();
       wsRef.current = null;
       remoteStreamsRef.current.clear();
       peopleRef.current.clear();
@@ -557,20 +614,30 @@ export function useTelinhaRoom(session: RoomSession | null) {
       setConnectionState(ConnectionState.Disconnected);
     };
   }, [
-    session,
+    session?.code,
+    session?.participantId,
+    session?.token,
+    session?.wsUrl,
+    session?.displayName,
     applyBitrate,
-    cleanupNativeShare,
     closeAllPeers,
     closePeer,
     flushIce,
     getOrCreatePeer,
     offerTo,
+    onSessionRefresh,
     publishWatchers,
     offerToEveryone,
     publishPeople,
     publishShares,
     sendSignal,
   ]);
+
+  useEffect(() => {
+    return () => {
+      void cleanupNativeShare();
+    };
+  }, [cleanupNativeShare]);
 
   const startShare = useCallback(
     async (sourceId: string, quality: ShareQuality) => {

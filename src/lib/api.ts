@@ -89,6 +89,10 @@ export async function joinRoom(code: string, displayName: string): Promise<RoomS
   return roomRequest(`/rooms/${encodeURIComponent(code)}/join`, { displayName });
 }
 
+export async function pingHealth(): Promise<void> {
+  await fetch(`${API_URL}/health`, { method: "GET", cache: "no-store" });
+}
+
 export async function enterRoom(code: string, displayName: string): Promise<RoomSession> {
   try {
     return await joinRoom(code, displayName);

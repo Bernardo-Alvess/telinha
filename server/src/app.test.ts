@@ -178,4 +178,98 @@ describe("telinha server", () => {
     second.close();
     host.close();
   });
+
+  it("mantém a sala e o viewer depois de uma queda curta do WebSocket", async () => {
+    const { server, base } = await listen();
+    running = server;
+    const hostHttp = await postJson(`${base}/rooms`, { displayName: "Ana" });
+    const hostSession = hostHttp.data as unknown as RoomSession;
+    const viewerHttp = await postJson(`${base}/rooms/${hostSession.code}/join`, { displayName: "Bia" });
+    const viewerSession = viewerHttp.data as unknown as RoomSession;
+
+    const host = new WebSocket(signalingUrl(hostSession));
+    const viewer = new WebSocket(signalingUrl(viewerSession));
+    await waitForType(host, "hello");
+    await waitForType(viewer, "hello");
+    host.send(JSON.stringify({ type: "share-started" }));
+    await waitForType(viewer, "share-started");
+
+    let viewerLeft = false;
+    host.on("message", (raw) => {
+      const data = JSON.parse(String(raw)) as Record<string, unknown>;
+      if (data.type === "participant-left") {
+        viewerLeft = true;
+      }
+    });
+
+    viewer.close();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(viewerLeft).toBe(false);
+
+    const again = new WebSocket(signalingUrl(viewerSession));
+    const hello = await waitForType(again, "hello");
+    expect(hello.type).toBe("hello");
+    expect(viewerLeft).toBe(false);
+
+    const rejoined = await postJson(`${base}/rooms/${hostSession.code}/join`, { displayName: "Cris" });
+    expect(rejoined.response.status).toBe(200);
+
+    again.close();
+    host.close();
+  });
+
+  it("avisa saída só depois da graça de reconexão", async () => {
+    const server = createTelinhaServer({
+      disableRateLimit: true,
+      reconnectGraceMs: 80,
+      cleanupIntervalMs: 20,
+    });
+    running = server;
+    await new Promise<void>((resolve) => {
+      server.http.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.http.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const hostHttp = await postJson(`${base}/rooms`, { displayName: "Ana" });
+    const hostSession = hostHttp.data as unknown as RoomSession;
+    const viewerHttp = await postJson(`${base}/rooms/${hostSession.code}/join`, { displayName: "Bia" });
+    const viewerSession = viewerHttp.data as unknown as RoomSession;
+
+    const host = new WebSocket(signalingUrl(hostSession));
+    const viewer = new WebSocket(signalingUrl(viewerSession));
+    await waitForType(host, "hello");
+    await waitForType(viewer, "hello");
+
+    viewer.close();
+    const left = await waitForType(host, "participant-left");
+    expect(left.participantId).toBe(viewerSession.participantId);
+    host.close();
+  });
+
+  it("preserva o share do host no hold e aceita join em sala Discord vazia", async () => {
+    const { server, base } = await listen();
+    running = server;
+    const created = await postJson(`${base}/rooms`, {
+      displayName: "Ana",
+      code: "D1198789764279717921",
+    });
+    expect(created.response.status).toBe(200);
+    const hostSession = created.data as unknown as RoomSession;
+    expect(hostSession.code).toBe("D1198789764279717921");
+
+    const host = new WebSocket(signalingUrl(hostSession));
+    await waitForType(host, "hello");
+    host.send(JSON.stringify({ type: "share-started" }));
+    host.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const again = new WebSocket(signalingUrl(hostSession));
+    const hello = await waitForType(again, "hello") as { you?: { sharing?: boolean } };
+    expect(hello.you?.sharing).toBe(true);
+    again.close();
+
+    const joined = await postJson(`${base}/rooms/${hostSession.code}/join`, { displayName: "Bia" });
+    expect(joined.response.status).toBe(200);
+  });
 });

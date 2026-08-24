@@ -14,7 +14,8 @@ import {
 } from "./codes.js";
 
 const SEAT_TTL_MS = 2 * 60 * 1000;
-const RECONNECT_GRACE_MS = 45 * 1000;
+const RECONNECT_GRACE_MS = 15 * 60 * 1000;
+const EMPTY_ROOM_GRACE_MS = 15 * 60 * 1000;
 const WS_HEARTBEAT_MS = 25 * 1000;
 const ROOM_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_ROOM_SIZE = 16;
@@ -40,6 +41,7 @@ interface Hold {
   id: string;
   token: string;
   name: string;
+  sharing: boolean;
   expiresAt: number;
 }
 
@@ -54,6 +56,7 @@ interface Participant {
 
 interface Room {
   createdAt: number;
+  emptiedAt: number | null;
   seats: Map<string, Seat>;
   holds: Map<string, Hold>;
   participants: Map<string, Participant>;
@@ -68,6 +71,9 @@ export interface TelinhaServerOptions {
   publicWsUrl?: string;
   disableRateLimit?: boolean;
   trustProxy?: boolean;
+  reconnectGraceMs?: number;
+  emptyRoomGraceMs?: number;
+  cleanupIntervalMs?: number;
 }
 
 export interface TelinhaServer {
@@ -119,6 +125,9 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
   const createHits = new Map<string, RateBucket>();
   const joinHits = new Map<string, RateBucket>();
   const configuredWsUrl = resolvePublicWsUrl(options.publicWsUrl);
+  const reconnectGraceMs = options.reconnectGraceMs ?? RECONNECT_GRACE_MS;
+  const emptyRoomGraceMs = options.emptyRoomGraceMs ?? EMPTY_ROOM_GRACE_MS;
+  const cleanupIntervalMs = options.cleanupIntervalMs ?? 5_000;
 
   function generateCode(): string {
     let code = "";
@@ -140,17 +149,18 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     }
   }
 
-  function pruneHolds(room: Room, now = Date.now()) {
+  function expireHolds(room: Room, now = Date.now()) {
     for (const [id, hold] of room.holds) {
       if (hold.expiresAt <= now) {
         room.holds.delete(id);
+        broadcast(room, { type: "participant-left", participantId: id });
       }
     }
   }
 
   function roomOccupancy(room: Room): number {
     pruneSeats(room);
-    pruneHolds(room);
+    expireHolds(room);
     return room.seats.size + room.holds.size + room.participants.size;
   }
 
@@ -158,13 +168,43 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     return room.participants.size === 0 && room.seats.size === 0 && room.holds.size === 0;
   }
 
+  function markRoomActivity(room: Room) {
+    if (roomIsEmpty(room)) {
+      room.emptiedAt ??= Date.now();
+    } else {
+      room.emptiedAt = null;
+    }
+  }
+
+  function shouldDropRoom(room: Room, now = Date.now()): boolean {
+    pruneSeats(room, now);
+    expireHolds(room, now);
+    if (!roomIsEmpty(room)) {
+      room.emptiedAt = null;
+      return false;
+    }
+    room.emptiedAt ??= now;
+    return now - room.emptiedAt > emptyRoomGraceMs || now - room.createdAt > ROOM_TTL_MS;
+  }
+
   function createEmptyRoom(): Room {
     return {
       createdAt: Date.now(),
+      emptiedAt: null,
       seats: new Map(),
       holds: new Map(),
       participants: new Map(),
     };
+  }
+
+  function getOrCreateRoom(code: string): Room {
+    const existing = rooms.get(code);
+    if (existing) {
+      return existing;
+    }
+    const room = createEmptyRoom();
+    rooms.set(code, room);
+    return room;
   }
 
   function issueSeat(room: Room, displayName: string): Seat {
@@ -189,7 +229,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
   }
 
   function reclaimHold(room: Room, participantId: string, token: string): Hold | null {
-    pruneHolds(room);
+    expireHolds(room);
     const hold = room.holds.get(participantId);
     if (!hold || hold.expiresAt <= Date.now() || !tokensEqual(hold.token, token)) {
       return null;
@@ -212,14 +252,38 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
       id: participant.id,
       token: participant.token,
       name: participant.name,
-      expiresAt: Date.now() + RECONNECT_GRACE_MS,
+      sharing: participant.sharing,
+      expiresAt: Date.now() + reconnectGraceMs,
     });
+    pruneSeats(room);
+    expireHolds(room);
+    markRoomActivity(room);
+  }
+
+  function dismissParticipant(code: string, participantId: string) {
+    const room = getRoom(code);
+    if (!room) return;
+    const participant = room.participants.get(participantId);
+    if (participant) {
+      participant.replaced = true;
+      room.participants.delete(participantId);
+    }
+    room.holds.delete(participantId);
     broadcast(room, { type: "participant-left", participantId });
     pruneSeats(room);
-    pruneHolds(room);
-    if (roomIsEmpty(room)) {
-      rooms.delete(normalizeRoomCode(code));
+    expireHolds(room);
+    markRoomActivity(room);
+  }
+
+  function listedPeople(room: Room) {
+    const people = new Map<string, { id: string; name: string; sharing: boolean }>();
+    for (const hold of room.holds.values()) {
+      people.set(hold.id, { id: hold.id, name: hold.name, sharing: hold.sharing });
     }
+    for (const participant of room.participants.values()) {
+      people.set(participant.id, publicParticipant(participant));
+    }
+    return [...people.values()];
   }
 
   function wsUrlFromRequest(req: express.Request): string {
@@ -289,13 +353,13 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
         return;
       }
 
-      const existing = rooms.get(requested) ?? createEmptyRoom();
+      const existing = getOrCreateRoom(requested);
       if (roomOccupancy(existing) >= MAX_ROOM_SIZE) {
         res.status(409).json({ error: "Essa sala está cheia." });
         return;
       }
-      rooms.set(requested, existing);
       const seat = issueSeat(existing, displayName);
+      existing.emptiedAt = null;
       res.json(sessionPayload(req, requested, seat, displayName));
       return;
     }
@@ -327,6 +391,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
 
     const displayName = sanitizeDisplayName(req.body?.displayName);
     const seat = issueSeat(room, displayName);
+    room.emptiedAt = null;
     res.json(sessionPayload(req, code, seat, displayName));
   });
 
@@ -339,6 +404,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
         ws.ping();
       }
     }, WS_HEARTBEAT_MS);
+    heartbeat.unref();
 
     ws.on("message", (raw) => {
       let message: ClientMessage;
@@ -350,6 +416,12 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
 
       if (message.type === "ping") {
         send(ws, { type: "pong" });
+        return;
+      }
+
+      if (message.type === "leave") {
+        dismissParticipant(code, participant.id);
+        ws.close();
         return;
       }
 
@@ -411,7 +483,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     send(ws, {
       type: "hello",
       you: publicParticipant(participant),
-      participants: [...room.participants.values()].map(publicParticipant),
+      participants: listedPeople(room),
     });
   }
 
@@ -446,7 +518,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     const participant: Participant = {
       id: admitted.id,
       name: admitted.name,
-      sharing: false,
+      sharing: "sharing" in admitted ? Boolean(admitted.sharing) : false,
       token,
       replaced: false,
       ws,
@@ -460,9 +532,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
   const cleanup = setInterval(() => {
     const now = Date.now();
     for (const [code, room] of rooms) {
-      pruneSeats(room, now);
-      pruneHolds(room, now);
-      if (roomIsEmpty(room) || (now - room.createdAt > ROOM_TTL_MS && room.participants.size === 0)) {
+      if (shouldDropRoom(room, now)) {
         rooms.delete(code);
       }
     }
@@ -473,13 +543,16 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
         }
       }
     }
-  }, 60 * 1000);
+  }, cleanupIntervalMs);
   cleanup.unref();
 
   return {
     http,
     close() {
       clearInterval(cleanup);
+      for (const client of wss.clients) {
+        client.terminate();
+      }
       return new Promise((resolve, reject) => {
         wss.close((wsError) => {
           http.close((httpError) => {

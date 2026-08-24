@@ -12,6 +12,7 @@ import { VolumeControl } from "../components/VolumeControl";
 interface RoomScreenProps {
   session: RoomSession;
   onLeave: () => void;
+  onSessionRefresh?: (session: RoomSession) => void;
   onSharingChange?: (sharing: boolean) => void;
   openPicker?: boolean;
   onPickerOpened?: () => void;
@@ -27,6 +28,7 @@ interface RoomToast {
 export function RoomScreen({
   session,
   onLeave,
+  onSessionRefresh,
   onSharingChange,
   openPicker,
   onPickerOpened,
@@ -59,7 +61,7 @@ export function RoomScreen({
     stopShare,
     setWatchingShare,
     error,
-  } = useTelinhaRoom(session);
+  } = useTelinhaRoom(session, { onSessionRefresh });
 
   useEffect(() => {
     onSharingChange?.(isSharing);

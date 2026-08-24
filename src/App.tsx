@@ -203,6 +203,7 @@ function App() {
         <RoomScreen
           session={session}
           onLeave={leaveRoom}
+          onSessionRefresh={setSession}
           onSharingChange={setIsSharing}
           openPicker={pendingShare}
           onPickerOpened={() => setPendingShare(false)}
