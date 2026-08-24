@@ -662,38 +662,37 @@ async function startNativeShare(
     }
   }, 5000);
 
-  const encodedQueue: Array<ArrayBuffer | Uint8Array> = [];
-  let decoding = false;
-  const pushFrame = async (bytes: ArrayBuffer | Uint8Array) => {
-    encodedQueue.push(bytes);
-    while (encodedQueue.length > 4) {
-      encodedQueue.shift();
+  let pumping = false;
+  let queued = false;
+  const pumpFrame = async () => {
+    if (pumping) {
+      queued = true;
+      return;
     }
-    if (decoding) return;
-    decoding = true;
-    while (encodedQueue.length > 0) {
-      const next = encodedQueue.shift();
-      if (!next) break;
-      try {
-        const bitmap = await decodeShareJpeg(next);
-        sink.push(bitmap);
-      } catch {
-        continue;
-      }
-      if (!sawFirstFrame) {
-        sawFirstFrame = true;
-        window.clearTimeout(timeout);
-        resolveFirst?.();
-      }
+    pumping = true;
+    try {
+      do {
+        queued = false;
+        try {
+          const bytes = await invoke<ArrayBuffer | Uint8Array>("read_share_frame");
+          const bitmap = await decodeShareJpeg(bytes);
+          await sink.push(bitmap);
+          if (!sawFirstFrame) {
+            sawFirstFrame = true;
+            window.clearTimeout(timeout);
+            resolveFirst?.();
+          }
+        } catch {
+        }
+      } while (queued);
+    } finally {
+      pumping = false;
     }
-    decoding = false;
   };
 
   refs.unlistensRef.current.push(
     await listen<ShareFrame>("share-frame", () => {
-      void invoke<ArrayBuffer | Uint8Array>("read_share_frame")
-        .then((bytes) => pushFrame(bytes))
-        .catch(() => undefined);
+      void pumpFrame();
     }),
   );
 
