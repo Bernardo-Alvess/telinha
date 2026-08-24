@@ -87,12 +87,11 @@ pub fn run() {
             capture::stop_share_capture,
             capture::set_window_layout
         ])
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::CloseRequested { api, .. } => {
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.emit("window-close-requested", ());
             }
-            _ => {}
         })
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "Mostrar Telinha", true, None::<&str>)?;
