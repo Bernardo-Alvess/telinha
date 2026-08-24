@@ -1,8 +1,6 @@
-import { PLAYOUT_DELAY_MS } from "./playout";
-
 interface VideoSink {
   track: MediaStreamTrack;
-  push: (bitmap: ImageBitmap) => void;
+  push: (bitmap: ImageBitmap) => Promise<void>;
   close: () => void;
 }
 
@@ -10,26 +8,28 @@ type TrackGeneratorCtor = new (init: { kind: "video" }) => MediaStreamTrack & {
   writable: WritableStream<VideoFrame>;
 };
 
-function createRawVideoSink(fps: number): VideoSink {
+export function createVideoSink(fps: number): VideoSink {
   const Generator = (globalThis as unknown as { MediaStreamTrackGenerator?: TrackGeneratorCtor })
     .MediaStreamTrackGenerator;
   if (typeof Generator === "function" && typeof VideoFrame === "function") {
     const generator = new Generator({ kind: "video" });
     const writer = generator.writable.getWriter();
-    let timestamp = 0;
     const duration = Math.round(1_000_000 / Math.max(fps, 1));
     generator.contentHint = "detail";
     return {
       track: generator,
-      push(bitmap) {
+      async push(bitmap) {
         const frame = new VideoFrame(bitmap, {
-          timestamp,
+          timestamp: Math.round(performance.now() * 1000),
           duration,
           alpha: "discard",
         });
-        timestamp += duration;
-        void writer.write(frame).finally(() => frame.close());
         bitmap.close();
+        try {
+          await writer.write(frame);
+        } finally {
+          frame.close();
+        }
       },
       close() {
         void writer.close().catch(() => undefined);
@@ -51,7 +51,7 @@ function createRawVideoSink(fps: number): VideoSink {
   track.contentHint = "detail";
   return {
     track,
-    push(bitmap) {
+    async push(bitmap) {
       if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
         canvas.width = bitmap.width;
         canvas.height = bitmap.height;
@@ -61,80 +61,6 @@ function createRawVideoSink(fps: number): VideoSink {
     },
     close() {
       track.stop();
-    },
-  };
-}
-
-export function createVideoSink(fps: number): VideoSink {
-  const inner = createRawVideoSink(fps);
-  const queue: ImageBitmap[] = [];
-  const interval = 1000 / Math.max(fps, 1);
-  const preroll = Math.max(2, Math.round(PLAYOUT_DELAY_MS / interval));
-  const maxQueue = preroll + 4;
-  let timer: number | null = null;
-  let startTimer: number | null = null;
-  let nextDue = 0;
-  let started = false;
-  let closed = false;
-
-  function schedule() {
-    if (closed) return;
-    const wait = Math.max(1, nextDue - performance.now());
-    timer = window.setTimeout(tick, wait);
-  }
-
-  function tick() {
-    if (closed) return;
-    const now = performance.now();
-    const frame = queue.shift();
-    if (frame) {
-      inner.push(frame);
-    }
-    nextDue += interval;
-    if (now - nextDue > interval * 2) {
-      nextDue = now + interval;
-    }
-    schedule();
-  }
-
-  function start() {
-    if (started || closed) return;
-    started = true;
-    nextDue = performance.now() + interval;
-    schedule();
-  }
-
-  return {
-    track: inner.track,
-    push(bitmap) {
-      if (closed) {
-        bitmap.close();
-        return;
-      }
-      queue.push(bitmap);
-      while (queue.length > maxQueue) {
-        queue.shift()?.close();
-      }
-      if (!started && startTimer == null) {
-        startTimer = window.setTimeout(start, PLAYOUT_DELAY_MS);
-      }
-      if (!started && queue.length >= preroll) {
-        start();
-      }
-    },
-    close() {
-      closed = true;
-      if (timer != null) {
-        window.clearTimeout(timer);
-      }
-      if (startTimer != null) {
-        window.clearTimeout(startTimer);
-      }
-      for (const bitmap of queue) {
-        bitmap.close();
-      }
-      queue.length = 0;
-      inner.close();
     },
   };
 }

@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { signalingUrl, type RoomSession } from "../lib/api";
 import { buildIceServers } from "../lib/ice";
 import { playStreamStarted, playViewerJoined } from "../lib/sounds";
+import { startDisplayMediaShare } from "../media/displayShare";
 import { createShareAudioTrack } from "../media/shareAudio";
 import { createVideoSink, decodeShareJpeg } from "../media/shareVideo";
 
@@ -79,6 +80,7 @@ export function useTelinhaRoom(session: RoomSession | null) {
   const audioPortRef = useRef<MessagePort | null>(null);
   const sharingRef = useRef(false);
   const useGpuEncodeRef = useRef(true);
+  const stopShareRef = useRef<() => Promise<void>>(async () => undefined);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>(
     ConnectionState.Disconnected,
@@ -539,12 +541,29 @@ export function useTelinhaRoom(session: RoomSession | null) {
       useGpuEncodeRef.current = quality.useGpuEncode;
 
       try {
-        const stream = await startNativeShare(sourceId, quality, {
-          unlistensRef,
-          videoSinkCloseRef,
-          audioContextRef,
-          audioNodeRef,
-          audioPortRef,
+        const stream =
+          (await startDisplayMediaShare(quality, sourceId)) ??
+          (await startNativeShare(sourceId, quality, {
+            unlistensRef,
+            videoSinkCloseRef,
+            audioContextRef,
+            audioNodeRef,
+            audioPortRef,
+          }));
+
+        if (quality.includeAudio && stream.getAudioTracks().length === 0) {
+          await attachLoopbackAudio(sourceId, {
+            unlistensRef,
+            audioContextRef,
+            audioNodeRef,
+            audioPortRef,
+          }, stream);
+        }
+
+        stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+          if (sharingRef.current) {
+            void stopShareRef.current();
+          }
         });
 
         localStreamRef.current = stream;
@@ -604,6 +623,8 @@ export function useTelinhaRoom(session: RoomSession | null) {
     publishShares(session.participantId, session.displayName);
   }, [cleanupNativeShare, closePeer, publishPeople, publishShares, publishWatchers, sendSignal, session]);
 
+  stopShareRef.current = stopShare;
+
   return {
     connectionState,
     isSharing,
@@ -623,6 +644,33 @@ interface AudioShareRefs {
   audioContextRef: MutableRefObject<AudioContext | null>;
   audioNodeRef: MutableRefObject<AudioNode | null>;
   audioPortRef: MutableRefObject<MessagePort | null>;
+}
+
+async function attachLoopbackAudio(
+  sourceId: string,
+  refs: AudioShareRefs,
+  stream: MediaStream,
+) {
+  const audio = await createShareAudioTrack();
+  if (!audio) return;
+  refs.audioContextRef.current = audio.context;
+  refs.audioNodeRef.current = audio.node;
+  refs.audioPortRef.current = audio.port ?? null;
+  refs.unlistensRef.current.push(
+    await listen<ShareAudio>("share-audio", (event) => {
+      refs.audioPortRef.current?.postMessage(Float32Array.from(event.payload.samples));
+    }),
+  );
+  await invoke("start_share_capture", {
+    id: sourceId,
+    fps: 15,
+    maxWidth: 0,
+    includeAudio: true,
+    includeVideo: false,
+  });
+  if (audio.track) {
+    stream.addTrack(audio.track);
+  }
 }
 
 async function startNativeShare(
@@ -662,38 +710,37 @@ async function startNativeShare(
     }
   }, 5000);
 
-  const encodedQueue: Array<ArrayBuffer | Uint8Array> = [];
-  let decoding = false;
-  const pushFrame = async (bytes: ArrayBuffer | Uint8Array) => {
-    encodedQueue.push(bytes);
-    while (encodedQueue.length > 4) {
-      encodedQueue.shift();
+  let pumping = false;
+  let queued = false;
+  const pumpFrame = async () => {
+    if (pumping) {
+      queued = true;
+      return;
     }
-    if (decoding) return;
-    decoding = true;
-    while (encodedQueue.length > 0) {
-      const next = encodedQueue.shift();
-      if (!next) break;
-      try {
-        const bitmap = await decodeShareJpeg(next);
-        sink.push(bitmap);
-      } catch {
-        continue;
-      }
-      if (!sawFirstFrame) {
-        sawFirstFrame = true;
-        window.clearTimeout(timeout);
-        resolveFirst?.();
-      }
+    pumping = true;
+    try {
+      do {
+        queued = false;
+        try {
+          const bytes = await invoke<ArrayBuffer | Uint8Array>("read_share_frame");
+          const bitmap = await decodeShareJpeg(bytes);
+          await sink.push(bitmap);
+          if (!sawFirstFrame) {
+            sawFirstFrame = true;
+            window.clearTimeout(timeout);
+            resolveFirst?.();
+          }
+        } catch {
+        }
+      } while (queued);
+    } finally {
+      pumping = false;
     }
-    decoding = false;
   };
 
   refs.unlistensRef.current.push(
     await listen<ShareFrame>("share-frame", () => {
-      void invoke<ArrayBuffer | Uint8Array>("read_share_frame")
-        .then((bytes) => pushFrame(bytes))
-        .catch(() => undefined);
+      void pumpFrame();
     }),
   );
 

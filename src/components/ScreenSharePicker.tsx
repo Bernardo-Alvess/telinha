@@ -262,7 +262,7 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
 
         <label
           className={`share-audio-toggle ${gpuInfo && !gpuInfo.available ? "is-disabled" : ""}`}
-          title="A captura continua em JPEG na CPU. Isto só escolhe se o envio WebRTC usa a GPU (H.264) ou a CPU (VP8)."
+          title="A captura usa a GPU do Chromium quando o Windows deixar. Isto escolhe H.264 (GPU) ou VP8 (CPU) no envio."
         >
           <input
             type="checkbox"
