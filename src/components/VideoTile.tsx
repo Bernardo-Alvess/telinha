@@ -3,30 +3,43 @@ import { useEffect, useRef } from "react";
 interface VideoTileProps {
   stream: MediaStream;
   active?: boolean;
-  expandable?: boolean;
-  onSelect?: () => void;
 }
 
-export function VideoTile({ stream, active, expandable, onSelect }: VideoTileProps) {
+export function VideoTile({ stream, active }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     const element = videoRef.current;
     if (!element) return;
+
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    const play = () => {
+      if (cancelled) return;
+      void element.play().catch(() => {
+        if (!cancelled) retryTimer = window.setTimeout(play, 300);
+      });
+    };
+
     element.srcObject = stream;
-    void element.play().catch(() => undefined);
+    element.defaultMuted = true;
+    element.muted = true;
+    element.addEventListener("loadedmetadata", play);
+    element.addEventListener("canplay", play);
+    play();
+
     return () => {
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      element.removeEventListener("loadedmetadata", play);
+      element.removeEventListener("canplay", play);
       element.srcObject = null;
     };
   }, [stream]);
 
   return (
-    <button
-      type="button"
-      className={`video-tile ${active ? "active" : ""} ${expandable ? "expandable" : ""}`}
-      onClick={onSelect}
-    >
+    <div className={`video-tile ${active ? "active" : ""}`}>
       <video ref={videoRef} autoPlay playsInline muted />
-    </button>
+    </div>
   );
 }

@@ -1,13 +1,19 @@
 import { useEffect, useRef, useState } from "react";
+import { PhoneOff } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { RoomSession } from "../lib/api";
-import { ConnectionState, useTelinhaRoom } from "../hooks/useTelinhaRoom";
+import {
+  ConnectionState,
+  useTelinhaRoom,
+  type ScreenShareInfo,
+} from "../hooks/useTelinhaRoom";
+import { ConnectionBadge, ErrorNotice } from "../components/ConnectionStatus";
 import { areSoundsEnabled, setSoundsEnabled } from "../lib/sounds";
 import { addWatching, mosaicColumns, pruneWatching, removeWatching } from "../lib/watch";
 import { ScreenSharePicker } from "../components/ScreenSharePicker";
 import { VideoTile } from "../components/VideoTile";
-import { VolumeControl } from "../components/VolumeControl";
+import { LiveControls } from "../components/LiveControls";
 
 interface RoomScreenProps {
   session: RoomSession;
@@ -34,6 +40,7 @@ export function RoomScreen({
   onPickerOpened,
 }: RoomScreenProps) {
   const [copied, setCopied] = useState(false);
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [watchingIds, setWatchingIds] = useState<string[]>([]);
   const [volume, setVolume] = useState(() => {
@@ -41,10 +48,10 @@ export function RoomScreen({
     return Number.isFinite(stored) ? Math.min(100, Math.max(0, stored)) : 100;
   });
   const [chromeVisible, setChromeVisible] = useState(true);
+  const [controlsLocked, setControlsLocked] = useState(false);
   const [watchFullscreen, setWatchFullscreen] = useState(() => {
     return localStorage.getItem("telinha-watch-fullscreen") === "1";
   });
-  const [mutedIds, setMutedIds] = useState<string[]>([]);
   const [roomSounds, setRoomSounds] = useState(areSoundsEnabled);
   const [toasts, setToasts] = useState<RoomToast[]>([]);
   const knownLives = useRef<Map<string, string>>(new Map());
@@ -57,6 +64,9 @@ export function RoomScreen({
     participants,
     watcherCounts,
     watcherNames,
+    connectionQuality,
+    copyDiagnostics,
+    retryConnections,
     startShare,
     stopShare,
     setWatchingShare,
@@ -201,6 +211,10 @@ export function RoomScreen({
       if (hideTimer.current) {
         window.clearTimeout(hideTimer.current);
       }
+      if (controlsLocked) {
+        setChromeVisible(true);
+        return;
+      }
       hideTimer.current = window.setTimeout(() => {
         setChromeVisible(false);
       }, 2000);
@@ -219,7 +233,7 @@ export function RoomScreen({
         window.clearTimeout(hideTimer.current);
       }
     };
-  }, [watching]);
+  }, [controlsLocked, watching]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -281,6 +295,17 @@ export function RoomScreen({
     setTimeout(() => setCopied(false), 2000);
   }
 
+  async function copyDiagnosticReport() {
+    const text = copyDiagnostics();
+    try {
+      await invoke("copy_to_clipboard", { text });
+    } catch {
+      await navigator.clipboard.writeText(text);
+    }
+    setDiagnosticsCopied(true);
+    window.setTimeout(() => setDiagnosticsCopied(false), 2000);
+  }
+
   const connected = connectionState === ConnectionState.Connected;
   const reconnecting = connectionState === ConnectionState.Reconnecting;
   const localViewers = watcherCounts[localId] ?? 0;
@@ -299,25 +324,26 @@ export function RoomScreen({
     setWatchingIds((current) => removeWatching(current, id));
   }
 
-  function watchLabel(id: string) {
-    if (watchingIds.includes(id)) return "Assistindo";
-    return watchingIds.length > 0 ? "Assistir junto" : "Assistir";
-  }
-
   function watchAll() {
     setWatchingIds(remoteShares.map((share) => share.participantIdentity));
   }
 
-  function toggleMute(id: string) {
-    setMutedIds((current) =>
-      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
-    );
+  function watchOnly(id: string) {
+    setWatchingIds([id]);
   }
 
   function toggleRoomSounds() {
     const next = !roomSounds;
     setRoomSounds(next);
     setSoundsEnabled(next);
+  }
+
+  function toggleOwnShare() {
+    if (isSharing) {
+      void stopShare();
+      return;
+    }
+    setPickerOpen(true);
   }
 
   if (pickerOpen) {
@@ -342,25 +368,25 @@ export function RoomScreen({
             key={share.participantIdentity}
             stream={share.stream}
             volume={volume}
-            muted={mutedIds.includes(share.participantIdentity)}
           />
         ))}
-        {isSharing && (
-          <div className="host-live-bar">
-            <span>Você está no ar · {localViewers} assistindo</span>
-            <button type="button" className="btn btn-danger" onClick={() => void stopShare()}>
-              Parar
-            </button>
-          </div>
-        )}
         <header className="watch-chrome top">
-          <div className="live-badges">
-            {watchingShares.map((share) => (
-              <div key={share.participantIdentity} className="live-badge">
-                {share.participantName} · {watcherCounts[share.participantIdentity] ?? 0} assistindo
+          <div className="watch-heading">
+            <div className="watch-live-title">
+              <span className="watch-live-label"><span />Ao vivo</span>
+              <strong>
+                {multiWatch
+                  ? `${watchingShares.length} transmissões`
+                  : watchingShares[0]?.participantName}
+              </strong>
+            </div>
+            {isSharing && (
+              <div className="self-live-status">
+                Sua tela está ao vivo · {localViewers} assistindo
               </div>
-            ))}
+            )}
           </div>
+          <ConnectionBadge quality={connectionQuality} />
         </header>
 
         <div
@@ -376,15 +402,8 @@ export function RoomScreen({
             <div key={share.participantIdentity} className="watch-pane">
               <VideoTile stream={share.stream} active />
               {multiWatch && <span className="watch-pane-name">{share.participantName}</span>}
-              <div className="watch-pane-actions">
-                <button
-                  type="button"
-                  className="watch-pane-close"
-                  onClick={() => toggleMute(share.participantIdentity)}
-                >
-                  {mutedIds.includes(share.participantIdentity) ? "Som" : "Mudo"}
-                </button>
-                {multiWatch && (
+              {multiWatch && (
+                <div className="watch-pane-actions">
                   <button
                     type="button"
                     className="watch-pane-close"
@@ -392,70 +411,61 @@ export function RoomScreen({
                   >
                     Fechar
                   </button>
-                )}
-              </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
 
         {remoteShares.length > 1 && (
-          <div className="share-tabs overlay-tabs">
+          <nav className="live-switcher overlay-tabs" aria-label="Escolher transmissão">
+            <span className="live-switcher-label">Ao vivo</span>
             {remoteShares.map((share) => (
               <button
                 key={share.participantIdentity}
                 type="button"
-                className={`share-tab ${watchingIds.includes(share.participantIdentity) ? "active" : ""}`}
-                onClick={() => watchShare(share.participantIdentity)}
+                className={`live-switcher-item ${watchingIds.length === 1 && watchingIds.includes(share.participantIdentity) ? "active" : ""}`}
+                aria-pressed={watchingIds.length === 1 && watchingIds.includes(share.participantIdentity)}
+                onClick={() => watchOnly(share.participantIdentity)}
               >
+                <span className="live-dot" aria-hidden="true" />
                 {share.participantName}
-                {watchingIds.includes(share.participantIdentity) || watchingIds.length === 0
-                  ? ""
-                  : " · junto"}
               </button>
             ))}
-            {watchingIds.length < remoteShares.length && (
-              <button type="button" className="share-tab" onClick={watchAll}>
-                Assistir todas
-              </button>
-            )}
-          </div>
+            <button
+              type="button"
+              className={`live-switcher-item grid-option ${watchingIds.length > 1 ? "active" : ""}`}
+              aria-pressed={watchingIds.length > 1}
+              onClick={watchAll}
+            >
+              <GridIcon />
+              Ver em grade
+            </button>
+          </nav>
         )}
 
-        <footer className="watch-chrome bottom">
-          <VolumeControl
-            volume={volume}
-            onChange={setVolume}
-            onInteract={() => setChromeVisible(true)}
-          />
-          <div className="watch-actions">
-            <button type="button" className="btn btn-ghost" onClick={toggleRoomSounds}>
-              {roomSounds ? "Sons ligados" : "Sons mudos"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => setWatchFullscreen((open) => !open)}
-            >
-              {watchFullscreen ? "Diminuir tela" : "Tela cheia"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-share"
-              onClick={() => setPickerOpen(true)}
-              disabled={!connected}
-            >
-              Compartilhar também
-            </button>
-            <button type="button" className="btn btn-secondary" onClick={() => stopWatching()}>
-              Parar de assistir
-            </button>
-          </div>
-          <button type="button" className="btn btn-ghost watch-leave" onClick={onLeave}>
-            Sair da sala
-          </button>
-        </footer>
+        <LiveControls
+          volume={volume}
+          fullscreen={watchFullscreen}
+          connected={connected}
+          isSharing={isSharing}
+          onVolumeChange={setVolume}
+          onToggleFullscreen={() => setWatchFullscreen((open) => !open)}
+          onToggleShare={toggleOwnShare}
+          onStopWatching={() => stopWatching()}
+          onLeaveRoom={onLeave}
+          onLockChange={setControlsLocked}
+        />
 
-        {error && <p className="error overlay-error">{error}</p>}
+        {error && (
+          <ErrorNotice
+            error={error}
+            copied={diagnosticsCopied}
+            onCopy={() => void copyDiagnosticReport()}
+            onRetry={() => void retryConnections()}
+            overlay
+          />
+        )}
         <ToastStack
           toasts={toasts}
           onWatch={(id) => {
@@ -470,19 +480,34 @@ export function RoomScreen({
   if (hosting) {
     return (
       <div className="screen room-screen host-screen">
-        <header className="room-header">
-          <div className="room-code-block">
-            <span className="room-code">{session.code}</span>
-            <button type="button" className="btn btn-ghost" onClick={copyCode}>
-              {copied ? "Copiado!" : "Copiar"}
+        <header className="host-header">
+          <div className="host-live-summary">
+            <span className="watch-live-label"><span />Ao vivo</span>
+            <div>
+              <strong>Sua tela</strong>
+              <small>
+                {localViewers === 0
+                  ? "Ninguém assistindo ainda"
+                  : `${localViewers} ${localViewers === 1 ? "pessoa assistindo" : "pessoas assistindo"}`}
+              </small>
+            </div>
+          </div>
+          <div className="host-header-actions">
+            <ConnectionBadge quality={connectionQuality} />
+            <button type="button" className="room-code-copy" onClick={copyCode}>
+              <span>Sala</span>
+              <strong>{session.code}</strong>
+              <small>{copied ? "Copiado" : "Copiar"}</small>
             </button>
           </div>
-          <span className="status online">No ar</span>
         </header>
 
         <div className="host-preview">
           {localShare ? (
-            <VideoTile stream={localShare.stream} active />
+            <>
+              <VideoTile stream={localShare.stream} active />
+              <span className="host-preview-label">Prévia da sua transmissão</span>
+            </>
           ) : (
             <div className="video-placeholder">
               <p>Preparando preview...</p>
@@ -491,42 +516,45 @@ export function RoomScreen({
         </div>
 
         {remoteShares.length > 0 && (
-          <div className="watch-list host-watch-list">
-            {remoteShares.map((share) => (
-              <div key={share.participantIdentity} className="watch-row">
-                <span>{share.participantName} está no ar</span>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => watchShare(share.participantIdentity)}
-                >
-                  {watchLabel(share.participantIdentity)}
-                </button>
-              </div>
-            ))}
-            {remoteShares.length > 1 && (
-              <button type="button" className="btn btn-secondary" onClick={watchAll}>
-                Assistir todas
-              </button>
-            )}
-          </div>
+          <LiveChooser
+            shares={remoteShares}
+            title="Outras transmissões"
+            compact
+            onWatch={watchOnly}
+            onWatchAll={watchAll}
+          />
         )}
 
-        <div className="sharing-bar">
-          <span>
-            {localViewers} assistindo
-            {watcherNames[localId]?.length ? ` · ${watcherNames[localId]!.join(", ")}` : ""}
-          </span>
-          <div className="host-bar-actions">
-            <button type="button" className="btn btn-danger" onClick={() => void stopShare()}>
-              Parar
+        <footer className="host-controls">
+          <div className="host-viewers" aria-live="polite">
+            {watcherNames[localId]?.length
+              ? `Assistindo: ${watcherNames[localId]!.join(", ")}`
+              : "Sua transmissão está pronta para receber espectadores"}
+          </div>
+          <div className="host-control-dock" aria-label="Controles da transmissão">
+            <button
+              type="button"
+              className="host-control-button stop-share"
+              onClick={() => void stopShare()}
+            >
+              <StopShareIcon />
+              <span>Parar transmissão</span>
             </button>
-            <button type="button" className="btn btn-ghost" onClick={onLeave}>
-              Sair da sala
+            <button type="button" className="host-control-button leave-room" onClick={onLeave}>
+              <PhoneOff aria-hidden="true" strokeWidth={2.2} />
+              <span>Sair da sala</span>
             </button>
           </div>
-        </div>
-        {error && <p className="error">{error}</p>}
+          <div className="host-control-spacer" aria-hidden="true" />
+        </footer>
+        {error && (
+          <ErrorNotice
+            error={error}
+            copied={diagnosticsCopied}
+            onCopy={() => void copyDiagnosticReport()}
+            onRetry={() => void retryConnections()}
+          />
+        )}
         <ToastStack toasts={toasts} onWatch={watchShare} />
       </div>
     );
@@ -534,80 +562,168 @@ export function RoomScreen({
 
   return (
     <div className="screen room-screen lobby-screen">
-      <header className="room-header">
-        <span className={`status ${connected ? "online" : ""}`}>
-          {connected ? displayName : reconnecting ? "Reconectando..." : "Conectando..."}
-        </span>
-        <button type="button" className="btn btn-ghost" onClick={toggleRoomSounds}>
-          {roomSounds ? "Sons ligados" : "Sons mudos"}
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={onLeave}>
-          Sair
-        </button>
+      <header className="room-header lobby-header">
+        <div className="room-statuses">
+          <span className={`status ${connected ? "online" : ""}`}>
+            {connected ? displayName : reconnecting ? "Reconectando..." : "Conectando..."}
+          </span>
+          <ConnectionBadge quality={connectionQuality} />
+        </div>
+        <div className="lobby-header-actions">
+          <button
+            type="button"
+            className="btn btn-ghost notification-toggle"
+            aria-label={roomSounds ? "Silenciar avisos da sala" : "Ativar avisos da sala"}
+            aria-pressed={roomSounds}
+            title={roomSounds ? "Silenciar avisos da sala" : "Ativar avisos da sala"}
+            onClick={toggleRoomSounds}
+          >
+            <NotificationIcon muted={!roomSounds} />
+            <span>Avisos</span>
+          </button>
+          <button type="button" className="btn btn-ghost lobby-leave" onClick={onLeave}>
+            Sair
+          </button>
+        </div>
       </header>
 
-      {reconnecting && <p className="reconnect-banner">A conexão caiu. Tentando de novo...</p>}
+      <main className="lobby-content">
+        {reconnecting && <p className="reconnect-banner">A conexão caiu. Tentando de novo...</p>}
 
-      <div className="lobby-code">
-        <p>Cole no Discord</p>
-        <strong>{session.code}</strong>
-        <button type="button" className="btn btn-primary" onClick={copyCode}>
-          {copied ? "Copiado!" : "Copiar código"}
-        </button>
-      </div>
-
-      <div className="people-list">
-        <p>Na sala</p>
-        {participants.length === 0 && <span className="muted">Conectando pessoas...</span>}
-        {participants.map((person) => (
-          <span key={person.identity} className="person-chip">
-            {person.name}
-            {person.isLocal ? " (você)" : ""}
-            {person.isSharing ? " · no ar" : ""}
-          </span>
-        ))}
-      </div>
-
-      {remoteShares.length > 0 ? (
-        <div className="watch-list">
-          <p>Telas disponíveis</p>
-          {remoteShares.map((share) => (
-            <div key={share.participantIdentity} className="watch-row">
-              <span>{share.participantName} está no ar</span>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => watchShare(share.participantIdentity)}
-              >
-                {watchLabel(share.participantIdentity)}
-              </button>
-            </div>
-          ))}
-          {remoteShares.length > 1 && (
-            <button type="button" className="btn btn-secondary" onClick={watchAll}>
-              Assistir todas
-            </button>
-          )}
+        <div className="lobby-code">
+          <p>Código da sala</p>
+          <strong>{session.code}</strong>
+          <button type="button" className="btn btn-primary" onClick={copyCode}>
+            {copied ? "Copiado!" : "Copiar código"}
+          </button>
         </div>
-      ) : (
-        <p className="hint">Esperando alguém transmitir a tela</p>
-      )}
 
-      <footer className="room-footer">
+        <div className="people-list">
+          <p>Na sala</p>
+          {participants.length === 0 && <span className="muted">Conectando pessoas...</span>}
+          {participants.map((person) => (
+            <span key={person.identity} className="person-chip">
+              {person.name}
+              {person.isLocal ? " (você)" : ""}
+              {person.isSharing ? " · no ar" : ""}
+              {!person.connected ? " · reconectando" : ""}
+            </span>
+          ))}
+        </div>
+
+        {remoteShares.length > 0 ? (
+          <LiveChooser
+            shares={remoteShares}
+            title="Transmissões ao vivo"
+            onWatch={watchOnly}
+            onWatchAll={watchAll}
+          />
+        ) : (
+          <p className="hint">Nenhuma transmissão no momento</p>
+        )}
+      </main>
+
+      <footer className="room-footer lobby-footer">
         <button
           type="button"
           className="btn btn-share"
           onClick={() => setPickerOpen(true)}
           disabled={!connected}
         >
+          <span className="share-icon" aria-hidden="true" />
           Compartilhar tela
         </button>
         <span className="shortcut-hint">Ctrl+Shift+S</span>
       </footer>
 
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <ErrorNotice
+          error={error}
+          copied={diagnosticsCopied}
+          onCopy={() => void copyDiagnosticReport()}
+          onRetry={() => void retryConnections()}
+        />
+      )}
       <ToastStack toasts={toasts} onWatch={watchShare} />
     </div>
+  );
+}
+
+function NotificationIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+      {muted && <path d="m4 4 16 16" />}
+    </svg>
+  );
+}
+
+function LiveChooser({
+  shares,
+  title,
+  compact,
+  onWatch,
+  onWatchAll,
+}: {
+  shares: ScreenShareInfo[];
+  title: string;
+  compact?: boolean;
+  onWatch: (id: string) => void;
+  onWatchAll: () => void;
+}) {
+  return (
+    <section className={`live-chooser ${compact ? "compact" : ""}`} aria-label={title}>
+      <header className="live-chooser-header">
+        <div>
+          <span className="live-dot" aria-hidden="true" />
+          <strong>{title}</strong>
+        </div>
+        <span>{shares.length}</span>
+      </header>
+      <div className="live-choice-list">
+        {shares.map((share) => (
+          <button
+            key={share.participantIdentity}
+            type="button"
+            className="live-choice"
+            onClick={() => onWatch(share.participantIdentity)}
+          >
+            <span className="live-choice-screen" aria-hidden="true" />
+            <span className="live-choice-copy">
+              <strong>{share.participantName}</strong>
+              <small>Transmitindo agora</small>
+            </span>
+            <span className="live-choice-action">Assistir</span>
+          </button>
+        ))}
+      </div>
+      {shares.length > 1 && (
+        <button type="button" className="watch-grid-button" onClick={onWatchAll}>
+          <GridIcon />
+          Ver todas em grade
+        </button>
+      )}
+    </section>
+  );
+}
+
+function GridIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
+function StopShareIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="13" rx="2" />
+      <path d="M9 9h6v4H9zM8 21h8M12 17v4" />
+    </svg>
   );
 }
 
@@ -640,17 +756,13 @@ function ToastStack({
 function WatchAudio({
   stream,
   volume,
-  muted,
 }: {
   stream: MediaStream;
   volume: number;
-  muted?: boolean;
 }) {
   const elementRef = useRef<HTMLAudioElement | null>(null);
   const volumeRef = useRef(volume);
-  const mutedRef = useRef(muted);
   volumeRef.current = volume;
-  mutedRef.current = muted;
 
   useEffect(() => {
     const tracks = stream.getAudioTracks();
@@ -660,7 +772,6 @@ function WatchAudio({
     element.setAttribute("playsinline", "true");
     element.srcObject = new MediaStream(tracks);
     element.volume = volumeRef.current / 100;
-    element.muted = Boolean(mutedRef.current);
     document.body.appendChild(element);
     elementRef.current = element;
     return () => {
@@ -675,9 +786,8 @@ function WatchAudio({
   useEffect(() => {
     if (elementRef.current) {
       elementRef.current.volume = volume / 100;
-      elementRef.current.muted = Boolean(muted);
     }
-  }, [muted, volume]);
+  }, [volume]);
 
   return null;
 }

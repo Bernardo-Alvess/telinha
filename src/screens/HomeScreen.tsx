@@ -1,6 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { createRoom, enterRoom, type RoomSession } from "../lib/api";
+import {
+  ROOM_CODE_LENGTH,
+  createRoom,
+  enterRoom,
+  isValidRoomCode,
+  normalizeRoomCode,
+  type RoomSession,
+} from "../lib/api";
 
 const NAME_KEY = "telinha-display-name";
 
@@ -9,19 +15,24 @@ interface HomeScreenProps {
   error?: string | null;
   invite?: ReactNode;
   joining?: boolean;
+  beforeEnter?: () => Promise<void>;
 }
 
-export function HomeScreen({ onJoin, error: incomingError, invite, joining }: HomeScreenProps) {
+export function HomeScreen({
+  onJoin,
+  error: incomingError,
+  invite,
+  joining,
+  beforeEnter,
+}: HomeScreenProps) {
   const [displayName, setDisplayName] = useState(
     () => localStorage.getItem(NAME_KEY) ?? "",
   );
   const [code, setCode] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [vencordBusy, setVencordBusy] = useState(false);
-  const [vencordConfirm, setVencordConfirm] = useState(false);
-  const [vencordMessage, setVencordMessage] = useState<string | null>(null);
+  const [operation, setOperation] = useState<"create" | "join" | null>(null);
   const [error, setError] = useState<string | null>(incomingError ?? null);
   const nickname = displayName.trim();
+  const busy = operation !== null || Boolean(joining);
 
   useEffect(() => {
     if (incomingError) {
@@ -36,156 +47,126 @@ export function HomeScreen({ onJoin, error: incomingError, invite, joining }: Ho
 
   async function handleCreate() {
     if (!nickname) {
-      setError("Escolha um apelido para os outros te verem.");
+      setError("Digite seu nome para continuar.");
       return;
     }
-    setLoading(true);
+    setOperation("create");
     setError(null);
     try {
+      await beforeEnter?.();
       const session = await createRoom(persistName());
       onJoin(session);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao criar sala");
+      setError(err instanceof Error ? err.message : "Não foi possível criar a sala.");
     } finally {
-      setLoading(false);
-    }
-  }
-
-  async function installVencord() {
-    setVencordBusy(true);
-    setVencordMessage("Isso pode levar alguns minutos na primeira vez...");
-    try {
-      const result = await invoke<{ message: string }>("install_vencord_plugin");
-      setVencordConfirm(false);
-      setVencordMessage(result.message);
-    } catch (err) {
-      setVencordMessage(err instanceof Error ? err.message : String(err));
-    } finally {
-      setVencordBusy(false);
+      setOperation(null);
     }
   }
 
   async function handleJoin(event: React.FormEvent) {
     event.preventDefault();
-    const trimmed = code.trim().toUpperCase();
-    if (!trimmed) return;
+    const trimmed = normalizeRoomCode(code);
+    if (!isValidRoomCode(trimmed)) {
+      setError("Digite o código de 6 caracteres da sala.");
+      return;
+    }
     if (!nickname) {
-      setError("Escolha um apelido para os outros te verem.");
+      setError("Digite seu nome para continuar.");
       return;
     }
 
-    setLoading(true);
+    setOperation("join");
     setError(null);
     try {
+      await beforeEnter?.();
       const session = await enterRoom(trimmed, persistName());
       onJoin(session);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao entrar");
+      setError(err instanceof Error ? err.message : "Não foi possível entrar na sala.");
     } finally {
-      setLoading(false);
+      setOperation(null);
     }
   }
 
   return (
-    <div className="screen home-screen">
-      <header className="header">
-        <h1>Telinha</h1>
-        <p>A voz fica no Discord. Aqui é só a tela.</p>
-      </header>
+    <main className="screen home-screen">
+      <div className="home-shell">
+        <header className="home-brand">
+          <span className="home-brand-mark" aria-hidden="true">
+            <span />
+          </span>
+          <span>Telinha</span>
+        </header>
 
-      <div className="actions">
-        <label className="name-field">
-          Como você quer aparecer
-          <input
-            type="text"
-            placeholder="Seu apelido"
-            value={displayName}
-            maxLength={24}
-            onChange={(e) => setDisplayName(e.target.value)}
-            disabled={loading || joining}
-          />
-        </label>
+        <section className="home-intro" aria-labelledby="home-title">
+          <h1 id="home-title">Sua tela, do jeito simples.</h1>
+          <p>Crie uma sala, compartilhe o código e comece a transmitir.</p>
+        </section>
 
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={handleCreate}
-          disabled={loading || joining || !nickname}
-        >
-          {loading ? "Abrindo sala..." : "Criar sala"}
-        </button>
+        <div className="actions">
+          <label className="name-field">
+            Seu nome
+            <input
+              type="text"
+              placeholder="Como você quer aparecer"
+              value={displayName}
+              maxLength={24}
+              autoComplete="nickname"
+              onChange={(e) => setDisplayName(e.target.value)}
+              disabled={busy}
+            />
+          </label>
 
-        <form className="join-form" onSubmit={handleJoin}>
-          <input
-            type="text"
-            className={code.trim().startsWith("D") ? "is-discord-code" : ""}
-            placeholder="Código da sala"
-            value={code}
-            onChange={(e) => setCode(e.target.value.toUpperCase())}
-            maxLength={24}
-            disabled={loading || joining}
-          />
           <button
-            type="submit"
-            className="btn btn-secondary"
-            disabled={loading || joining || !code.trim() || !nickname}
+            type="button"
+            className="btn btn-primary home-create"
+            onClick={handleCreate}
+            disabled={busy || !nickname}
           >
-            {joining ? "Entrando..." : "Entrar"}
+            {operation === "create" ? "Abrindo sala..." : "Criar sala"}
           </button>
-        </form>
-      </div>
 
-      {invite}
-
-      {joining && <p className="hint">Entrando na sala...</p>}
-      {error && <p className="error">{error}</p>}
-
-      <footer className="vencord-setup">
-        {vencordConfirm ? (
-          <div className="notice">
-            <strong>Instalar o botão no Discord?</strong>
-            <p>
-              Isso instala o botão Telinha no Discord. Feche o Discord pela bandeja depois,
-              inclusive o ícone escondido. Se o Discord atualizar sozinho e o botão sumir,
-              clique aqui de novo. Pode violar os termos do Discord.
-            </p>
-            <div className="notice-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={vencordBusy}
-                onClick={() => setVencordConfirm(false)}
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={loading || vencordBusy}
-                onClick={() => void installVencord()}
-              >
-                {vencordBusy ? "Instalando..." : "Entendi, instalar"}
-              </button>
-            </div>
+          <div className="home-divider">
+            <span>ou entre em uma sala</span>
           </div>
-        ) : (
-          <>
-            <p>Quer um botão Telinha no Discord?</p>
+
+          <form className="join-form" onSubmit={handleJoin}>
+            <input
+              type="text"
+              aria-label="Código da sala"
+              placeholder="Código de 6 caracteres"
+              value={code}
+              onChange={(e) => setCode(normalizeRoomCode(e.target.value))}
+              maxLength={ROOM_CODE_LENGTH}
+              autoComplete="off"
+              spellCheck={false}
+              disabled={busy}
+            />
             <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={loading || vencordBusy}
-              onClick={() => {
-                setVencordMessage(null);
-                setVencordConfirm(true);
-              }}
+              type="submit"
+              className="btn btn-secondary"
+              disabled={busy || !isValidRoomCode(code) || !nickname}
             >
-              Colocar no Vencord
+              {operation === "join" || joining ? "Entrando..." : "Entrar"}
             </button>
-          </>
+          </form>
+        </div>
+
+        {invite}
+
+        {joining && (
+          <p className="hint" aria-live="polite">
+            Entrando na sala...
+          </p>
         )}
-        {vencordMessage && <p className="vencord-status">{vencordMessage}</p>}
-      </footer>
-    </div>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+
+        <p className="home-note">Sem conta. Entre apenas com um código.</p>
+      </div>
+    </main>
   );
 }

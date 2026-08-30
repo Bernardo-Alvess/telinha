@@ -1,9 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ClosePrompt } from "./components/ClosePrompt";
-import { enterRoom, type RoomSession } from "./lib/api";
+import { enterRoom, leaveRoomSession, type RoomSession } from "./lib/api";
 import { actionFromUrls } from "./lib/deepLink";
+import {
+  clearActiveSession,
+  flushPendingLeaves,
+  loadActiveSession,
+  queuePendingLeave,
+  saveActiveSession,
+} from "./lib/sessionStore";
 import { HomeScreen } from "./screens/HomeScreen";
 import { RoomScreen } from "./screens/RoomScreen";
 import "./App.css";
@@ -20,7 +27,7 @@ function displayName(override?: string): string {
 }
 
 function App() {
-  const [session, setSession] = useState<RoomSession | null>(null);
+  const [session, setSession] = useState<RoomSession | null>(loadActiveSession);
   const [pendingCode, setPendingCode] = useState<string | null>(null);
   const [pendingInvite, setPendingInvite] = useState<PendingInvite | null>(null);
   const [pendingShare, setPendingShare] = useState(false);
@@ -28,8 +35,50 @@ function App() {
   const [isSharing, setIsSharing] = useState(false);
   const [closePrompt, setClosePrompt] = useState(false);
   const sessionRef = useRef(session);
+
+  const adoptSession = useCallback((next: RoomSession) => {
+    sessionRef.current = next;
+    saveActiveSession(next);
+    setSession(next);
+  }, []);
+
+  const flushLeaves = useCallback(
+    () => flushPendingLeaves((pending) => leaveRoomSession(pending)),
+    [],
+  );
+
+  const releaseSession = useCallback(async (current: RoomSession) => {
+    clearActiveSession();
+    try {
+      await leaveRoomSession(current);
+    } catch {
+      queuePendingLeave(current);
+    }
+  }, []);
+
+  const leaveRoom = useCallback(async () => {
+    const current = sessionRef.current;
+    if (current) await releaseSession(current);
+    sessionRef.current = null;
+    setSession(null);
+    setPendingShare(false);
+    setIsSharing(false);
+    setClosePrompt(false);
+  }, [releaseSession]);
+
   useEffect(() => {
     sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    void flushLeaves();
+  }, [flushLeaves]);
+
+  useEffect(() => {
+    if (!session) return;
+    saveActiveSession(session);
+    const refresh = window.setInterval(() => saveActiveSession(session), 60_000);
+    return () => window.clearInterval(refresh);
   }, [session]);
 
   useEffect(() => {
@@ -102,6 +151,25 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    listen("app-quit-requested", () => {
+      void leaveRoom().finally(() => {
+        void invoke("quit_app").catch(() => undefined);
+      });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [leaveRoom]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
     listen("window-close-requested", () => {
       setClosePrompt(true);
     })
@@ -122,10 +190,11 @@ function App() {
   useEffect(() => {
     if (!pendingCode) return;
     let cancelled = false;
-    void enterRoom(pendingCode, displayName())
+    void flushLeaves()
+      .then(() => enterRoom(pendingCode, displayName()))
       .then((next) => {
         if (!cancelled) {
-          setSession(next);
+          adoptSession(next);
           setPendingCode(null);
         }
       })
@@ -138,24 +207,23 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [pendingCode]);
+  }, [adoptSession, flushLeaves, pendingCode]);
 
-  function acceptInvite(invite: PendingInvite) {
+  async function acceptInvite(invite: PendingInvite) {
     if (invite.name) {
       localStorage.setItem(NAME_KEY, invite.name.slice(0, 24));
     }
+    if (sessionRef.current?.code === invite.code) {
+      setPendingInvite(null);
+      return;
+    }
+    if (sessionRef.current) {
+      await leaveRoom();
+    }
     setPendingInvite(null);
     setJoinError(null);
-    setSession(null);
     setPendingShare(false);
     setPendingCode(invite.code);
-  }
-
-  function leaveRoom() {
-    setSession(null);
-    setPendingShare(false);
-    setIsSharing(false);
-    setClosePrompt(false);
   }
 
   const closeDialog = closePrompt ? (
@@ -167,10 +235,12 @@ function App() {
         void invoke("hide_main_window").catch(() => undefined);
       }}
       onLeaveRoom={() => {
-        leaveRoom();
+        void leaveRoom();
       }}
       onQuit={() => {
-        void invoke("quit_app").catch(() => undefined);
+        void leaveRoom().finally(() => {
+          void invoke("quit_app").catch(() => undefined);
+        });
       }}
       onCancel={() => setClosePrompt(false)}
     />
@@ -188,7 +258,7 @@ function App() {
         <button type="button" className="btn btn-secondary" onClick={() => setPendingInvite(null)}>
           Agora não
         </button>
-        <button type="button" className="btn btn-primary" onClick={() => acceptInvite(pendingInvite)}>
+        <button type="button" className="btn btn-primary" onClick={() => void acceptInvite(pendingInvite)}>
           Entrar
         </button>
       </div>
@@ -202,8 +272,8 @@ function App() {
         {inviteBanner ? <div className="notice-overlay">{inviteBanner}</div> : null}
         <RoomScreen
           session={session}
-          onLeave={leaveRoom}
-          onSessionRefresh={setSession}
+          onLeave={() => void leaveRoom()}
+          onSessionRefresh={adoptSession}
           onSharingChange={setIsSharing}
           openPicker={pendingShare}
           onPickerOpened={() => setPendingShare(false)}
@@ -216,10 +286,11 @@ function App() {
     <>
       {closeDialog}
       <HomeScreen
-        onJoin={setSession}
+        onJoin={adoptSession}
         error={joinError}
         invite={inviteBanner}
         joining={Boolean(pendingCode)}
+        beforeEnter={flushLeaves}
       />
     </>
   );

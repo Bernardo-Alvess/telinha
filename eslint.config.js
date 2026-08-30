@@ -5,7 +5,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist", "src-tauri", "server", "vencord-plugin", "scripts"],
+    ignores: ["dist", "src-tauri", "server"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

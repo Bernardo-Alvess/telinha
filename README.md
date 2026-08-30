@@ -1,20 +1,21 @@
 # Telinha
 
-Complemento de compartilhamento de tela para usar junto com o Discord no Windows. A voz e o chat ficam no Discord; o Telinha cuida só do vídeo da tela em uma janela flutuante.
+Aplicativo leve de compartilhamento de tela para Windows. Crie uma sala por código, compartilhe uma tela e assista em uma janela separada, sem precisar criar conta.
+
+O Telinha pode acompanhar a chamada que você já usa. Quando o áudio da tela está ativo, ele exclui o processo do Discord para impedir que a voz da chamada volte na transmissão.
 
 ## Como funciona
 
-1. Todo mundo fica na call do Discord.
-2. Alguém abre o Telinha e clica **Criar sala**.
-3. Copia o código e cola no chat do Discord.
-4. Os outros abrem o Telinha, colam o código e entram.
-5. Qualquer pessoa pode clicar **Compartilhar tela** (ou `Ctrl+Shift+S`).
+1. Alguém abre o Telinha e clica **Criar sala**.
+2. Copia o código e envia para as outras pessoas.
+3. Cada pessoa abre o Telinha, cola o código e entra.
+4. Qualquer pessoa pode clicar **Compartilhar tela** (ou `Ctrl+Shift+S`).
 
 O Telinha abre diretamente o seletor seguro do Windows uma única vez. O vídeo usa `getDisplayMedia` do Chromium para capturar e codificar pela GPU, sem passar pelo pipeline JPEG. O áudio usa o loopback por processo do Windows para excluir a árvore do Discord e evitar que a call volte na live.
 
 O vídeo vai do PC de quem compartilha direto para os amigos (WebRTC). O servidor só troca o código da sala e o handshake.
 
-Opcional: **Colocar no Vencord** instala um botão no Discord que abre `telinha://` na sala do canal. Isso altera o cliente do Discord.
+O Telinha não modifica o Discord nem instala builds customizadas do Vencord.
 
 ## Pré-requisitos
 
@@ -31,9 +32,13 @@ cp server/.env.example server/.env
 
 No `.env` do app, `VITE_API_URL=http://localhost:3001` serve para desenvolver. O `tauri build` usa `.env.production` (servidor público). Para um `.exe` apontando para localhost, `VITE_ALLOW_LOCAL_API=1`.
 
-TURN é opcional (`VITE_TURN_URL`, `VITE_TURN_USERNAME`, `VITE_TURN_CREDENTIAL`). Sem isso o WebRTC usa só STUN e pode falhar em redes restritas.
+TURN próprio é opcional (`VITE_TURN_URL`, `VITE_TURN_USERNAME`, `VITE_TURN_CREDENTIAL`). Enquanto
+ele não estiver configurado, o app usa STUN e um relay público apenas como tentativa. Redes com CGNAT,
+firewall corporativo ou UDP bloqueado ainda podem impedir a live; nesse caso o app mostra a falha e
+permite copiar as métricas em vez de permanecer indefinidamente em uma tela preta.
 
 No servidor, `WS_PUBLIC_URL` fixa a URL pública do WebSocket. `TRUST_PROXY=1` só se estiver atrás de um proxy.
+`MIN_PROTOCOL_VERSION` controla a versão mínima aceita pelo HTTP e WebSocket e usa `2` por padrão.
 
 Não commite `.env` com credenciais.
 
@@ -57,16 +62,38 @@ Ou tudo junto:
 npm install && cd server && npm install && cd .. && npm run dev:all
 ```
 
+### Teste solo com dois usuários
+
+Execute `npm run dev:solo`, abra `http://127.0.0.1:1420` em duas janelas anônimas separadas e use
+um nome em cada uma. Também é possível usar o app Tauri como o primeiro usuário e o navegador como
+o segundo. No navegador, deixe o áudio do sistema desativado; o loopback que exclui o Discord só
+existe no aplicativo Windows.
+
+Para executar o fluxo automatizado com mídia sintética:
+
+```bash
+npm run test:e2e
+```
+
 ## Testes
 
 ```bash
 npm test
+npm run test:e2e
 npm run lint
 cd server && npm test && npm run lint
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-O CI do PR só roda `cargo fmt --check` no Rust. Compilar Tauri + Clippy no Windows passava de 10 minutos; o compile de verdade fica no `tauri build` local e no **Release Windows**.
+O CI sempre roda `cargo fmt --check`. Quando arquivos do Tauri mudam, um job Windows adicional
+executa os testes Rust e `cargo clippy --all-targets -- -D warnings`.
+
+## Conexão e diagnóstico
+
+A sala mostra um estado simples de conexão: boa, instável, reconectando ou sem conexão. Em caso
+de erro, **Copiar diagnóstico** gera um relatório local com estados e métricas WebRTC. O relatório
+não inclui token, código da sala, nomes, SDP, candidatos ICE nem endereços de rede.
+O relatório inclui versão do app, codec, bytes, frames decodificados e o tipo de rota ICE, sem expor IPs.
 
 ## Build Windows
 

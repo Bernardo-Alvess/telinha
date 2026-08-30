@@ -5,12 +5,8 @@ export function normalizeRoomCode(value: string): string {
   return value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
 }
 
-export function isDiscordRoomCode(code: string): boolean {
-  return /^D\d{16,22}$/.test(code);
-}
-
 export function isValidRoomCode(code: string): boolean {
-  return isDiscordRoomCode(code) || /^[A-Z0-9]{4,8}$/.test(code);
+  return code.length === CODE_LENGTH && [...code].every((character) => CODE_CHARS.includes(character));
 }
 
 export function sanitizeDisplayName(value: unknown): string {

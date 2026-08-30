@@ -1,6 +1,6 @@
 [package]
 name = "telinha"
-version = "0.1.0"
+version = "0.2.0"
 description = "Complemento de tela para Discord"
 authors = ["you"]
 edition = "2021"
@@ -29,7 +29,6 @@ base64 = "0.22"
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.19"
 webview2-com = "0.38"
-sha2 = "0.10"
 windows = { version = "0.61", features = ["Win32_Graphics_Dxgi", "Win32_System_Diagnostics_ToolHelp"] }
 
 [profile.release]

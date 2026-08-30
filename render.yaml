@@ -5,9 +5,11 @@ services:
     plan: free
     region: oregon
     rootDir: server
-    buildCommand: npm install
+    buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
         value: "22"
+      - key: MIN_PROTOCOL_VERSION
+        value: "2"

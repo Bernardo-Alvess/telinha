@@ -6,12 +6,18 @@ import { WebSocketServer, type WebSocket } from "ws";
 import {
   CODE_CHARS,
   CODE_LENGTH,
-  isDiscordRoomCode,
   isValidRoomCode,
   normalizeRoomCode,
   resolvePublicWsUrl,
   sanitizeDisplayName,
 } from "./codes.js";
+import {
+  CURRENT_PROTOCOL_VERSION,
+  MAX_SIGNAL_PAYLOAD_BYTES,
+  isProtocolError,
+  parseClientSignal,
+  readProtocolVersion,
+} from "./protocol.js";
 
 const SEAT_TTL_MS = 2 * 60 * 1000;
 const RECONNECT_GRACE_MS = 15 * 60 * 1000;
@@ -22,13 +28,6 @@ const MAX_ROOM_SIZE = 16;
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const CREATE_LIMIT = 8;
 const JOIN_LIMIT = 30;
-
-interface ClientMessage {
-  type: string;
-  to?: string;
-  sdp?: string;
-  candidate?: unknown;
-}
 
 interface Seat {
   id: string;
@@ -74,6 +73,7 @@ export interface TelinhaServerOptions {
   reconnectGraceMs?: number;
   emptyRoomGraceMs?: number;
   cleanupIntervalMs?: number;
+  minProtocolVersion?: number;
 }
 
 export interface TelinhaServer {
@@ -98,11 +98,12 @@ function tokensEqual(left: string, right: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-function publicParticipant(participant: Participant) {
+function publicParticipant(participant: Participant, connected = true) {
   return {
     id: participant.id,
     name: participant.name,
     sharing: participant.sharing,
+    connected,
   };
 }
 
@@ -128,6 +129,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
   const reconnectGraceMs = options.reconnectGraceMs ?? RECONNECT_GRACE_MS;
   const emptyRoomGraceMs = options.emptyRoomGraceMs ?? EMPTY_ROOM_GRACE_MS;
   const cleanupIntervalMs = options.cleanupIntervalMs ?? 5_000;
+  const minProtocolVersion = options.minProtocolVersion ?? CURRENT_PROTOCOL_VERSION;
 
   function generateCode(): string {
     let code = "";
@@ -197,16 +199,6 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     };
   }
 
-  function getOrCreateRoom(code: string): Room {
-    const existing = rooms.get(code);
-    if (existing) {
-      return existing;
-    }
-    const room = createEmptyRoom();
-    rooms.set(code, room);
-    return room;
-  }
-
   function issueSeat(room: Room, displayName: string): Seat {
     const seat: Seat = {
       id: createParticipantId(),
@@ -255,6 +247,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
       sharing: participant.sharing,
       expiresAt: Date.now() + reconnectGraceMs,
     });
+    broadcast(room, { type: "participant-presence", participantId, connected: false });
     pruneSeats(room);
     expireHolds(room);
     markRoomActivity(room);
@@ -269,16 +262,26 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
       room.participants.delete(participantId);
     }
     room.holds.delete(participantId);
+    room.seats.delete(participantId);
     broadcast(room, { type: "participant-left", participantId });
+    participant?.ws.close(1000, "Participant left");
     pruneSeats(room);
     expireHolds(room);
     markRoomActivity(room);
   }
 
   function listedPeople(room: Room) {
-    const people = new Map<string, { id: string; name: string; sharing: boolean }>();
+    const people = new Map<
+      string,
+      { id: string; name: string; sharing: boolean; connected: boolean }
+    >();
     for (const hold of room.holds.values()) {
-      people.set(hold.id, { id: hold.id, name: hold.name, sharing: hold.sharing });
+      people.set(hold.id, {
+        id: hold.id,
+        name: hold.name,
+        sharing: hold.sharing,
+        connected: false,
+      });
     }
     for (const participant of room.participants.values()) {
       people.set(participant.id, publicParticipant(participant));
@@ -304,6 +307,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
       token: seat.token,
       displayName,
       wsUrl: wsUrlFromRequest(req),
+      protocolVersion: CURRENT_PROTOCOL_VERSION,
     };
   }
 
@@ -339,28 +343,27 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
   app.use(cors());
   app.use(express.json({ limit: "32kb" }));
 
+  function requireProtocol(req: express.Request, res: express.Response, next: express.NextFunction) {
+    const version = readProtocolVersion(req.body?.protocolVersion);
+    if (version < minProtocolVersion) {
+      res.status(426).json({
+        error: "Esta versão do Telinha precisa ser atualizada.",
+        code: "UPDATE_REQUIRED",
+        minimumProtocolVersion: minProtocolVersion,
+      });
+      return;
+    }
+    next();
+  }
+
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "telinha-server" });
   });
 
-  app.post("/rooms", rateLimited(createHits, CREATE_LIMIT), (req, res) => {
+  app.post("/rooms", requireProtocol, rateLimited(createHits, CREATE_LIMIT), (req, res) => {
     const displayName = sanitizeDisplayName(req.body?.displayName);
-    const requested = normalizeRoomCode(typeof req.body?.code === "string" ? req.body.code : "");
-
-    if (requested) {
-      if (!isDiscordRoomCode(requested)) {
-        res.status(400).json({ error: "Só é possível escolher o código de uma sala do Discord." });
-        return;
-      }
-
-      const existing = getOrCreateRoom(requested);
-      if (roomOccupancy(existing) >= MAX_ROOM_SIZE) {
-        res.status(409).json({ error: "Essa sala está cheia." });
-        return;
-      }
-      const seat = issueSeat(existing, displayName);
-      existing.emptiedAt = null;
-      res.json(sessionPayload(req, requested, seat, displayName));
+    if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "code")) {
+      res.status(400).json({ error: "Código personalizado não é suportado." });
       return;
     }
 
@@ -371,7 +374,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     res.json(sessionPayload(req, code, seat, displayName));
   });
 
-  app.post("/rooms/:code/join", rateLimited(joinHits, JOIN_LIMIT), (req, res) => {
+  app.post("/rooms/:code/join", requireProtocol, rateLimited(joinHits, JOIN_LIMIT), (req, res) => {
     const rawCode = req.params.code;
     const code = normalizeRoomCode(Array.isArray(rawCode) ? rawCode[0] ?? "" : rawCode ?? "");
     if (!isValidRoomCode(code)) {
@@ -395,8 +398,44 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     res.json(sessionPayload(req, code, seat, displayName));
   });
 
+  app.delete("/rooms/:code/participants/:participantId", (req, res) => {
+    const rawCode = req.params.code;
+    const code = normalizeRoomCode(Array.isArray(rawCode) ? rawCode[0] ?? "" : rawCode ?? "");
+    const rawParticipantId = req.params.participantId;
+    const participantId = Array.isArray(rawParticipantId)
+      ? rawParticipantId[0] ?? ""
+      : rawParticipantId ?? "";
+    const authorization = req.header("authorization") ?? "";
+    const [scheme, token = ""] = authorization.split(/\s+/, 2);
+
+    const room = rooms.get(code);
+    if (!room) {
+      res.status(204).end();
+      return;
+    }
+    const identity =
+      room.participants.get(participantId) ??
+      room.holds.get(participantId) ??
+      room.seats.get(participantId);
+    if (!identity) {
+      res.status(204).end();
+      return;
+    }
+    if (scheme.toLowerCase() !== "bearer" || !tokensEqual(identity.token, token)) {
+      res.status(403).json({ error: "Token de participante inválido." });
+      return;
+    }
+
+    dismissParticipant(code, participantId);
+    res.status(204).end();
+  });
+
   const http = createServer(app);
-  const wss = new WebSocketServer({ server: http, path: "/ws" });
+  const wss = new WebSocketServer({
+    server: http,
+    path: "/ws",
+    maxPayload: MAX_SIGNAL_PAYLOAD_BYTES,
+  });
 
   function wireSocket(ws: WebSocket, room: Room, code: string, participant: Participant) {
     const heartbeat = setInterval(() => {
@@ -407,10 +446,10 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     heartbeat.unref();
 
     ws.on("message", (raw) => {
-      let message: ClientMessage;
-      try {
-        message = JSON.parse(String(raw)) as ClientMessage;
-      } catch {
+      const message = parseClientSignal(String(raw));
+      if (isProtocolError(message)) {
+        send(ws, { type: "error", code: "protocol-error", message: message.message });
+        ws.close(1008, "Invalid signaling message");
         return;
       }
 
@@ -447,7 +486,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
         const target = room.participants.get(message.to);
         if (!target || target.id === participant.id) return;
         if (message.type === "watch-started" && !target.sharing) return;
-        broadcast(room, {
+        send(target.ws, {
           type: message.type,
           from: participant.id,
           to: target.id,
@@ -462,12 +501,19 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
       ) {
         const target = room.participants.get(message.to);
         if (!target) return;
-        send(target.ws, {
-          type: message.type,
-          from: participant.id,
-          sdp: message.sdp,
-          candidate: message.candidate,
-        });
+        if (message.type === "ice") {
+          send(target.ws, {
+            type: message.type,
+            from: participant.id,
+            candidate: message.candidate,
+          });
+        } else {
+          send(target.ws, {
+            type: message.type,
+            from: participant.id,
+            sdp: message.sdp,
+          });
+        }
       }
     });
 
@@ -488,10 +534,23 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
   }
 
   wss.on("connection", (ws, req) => {
+    ws.on("error", () => {
+      // Limites de payload e falhas de transporte encerram o socket; o evento close faz o cleanup.
+    });
     const url = new URL(req.url ?? "/ws", "http://localhost");
     const code = normalizeRoomCode(url.searchParams.get("code") ?? "");
     const participantId = url.searchParams.get("participantId") ?? "";
     const token = url.searchParams.get("token") ?? "";
+    const protocolVersion = readProtocolVersion(Number(url.searchParams.get("protocolVersion")));
+    if (protocolVersion < minProtocolVersion) {
+      send(ws, {
+        type: "error",
+        code: "update-required",
+        message: "Esta versão do Telinha precisa ser atualizada.",
+      });
+      ws.close(1008, "Update required");
+      return;
+    }
     const room = rooms.get(code);
     const live = room?.participants.get(participantId);
     if (room && live && tokensEqual(live.token, token)) {
@@ -526,7 +585,19 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     room.participants.set(participant.id, participant);
     wireSocket(ws, room, code, participant);
     greet(ws, room, participant);
-    broadcast(room, { type: "participant-joined", participant: publicParticipant(participant) }, participant.id);
+    if (hold) {
+      broadcast(
+        room,
+        { type: "participant-presence", participantId: participant.id, connected: true },
+        participant.id,
+      );
+    } else {
+      broadcast(
+        room,
+        { type: "participant-joined", participant: publicParticipant(participant) },
+        participant.id,
+      );
+    }
   });
 
   const cleanup = setInterval(() => {

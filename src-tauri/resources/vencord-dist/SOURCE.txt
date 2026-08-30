@@ -1,4 +1,0 @@
-This bundle contains a modified Vencord build with the Telinha userplugin.
-Vencord is licensed under GPL-3.0-or-later.
-Corresponding source: https://github.com/llorenzocardoso/telinha
-Upstream source: https://github.com/Vendicated/Vencord

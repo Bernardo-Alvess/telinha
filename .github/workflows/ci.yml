@@ -10,6 +10,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      tauri: ${{ steps.filter.outputs.tauri }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            tauri:
+              - 'src-tauri/**'
+              - '.github/workflows/ci.yml'
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -42,6 +56,18 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm ci --prefix server
+      - run: npm run test:e2e
+
   rust:
     runs-on: ubuntu-latest
     defaults:
@@ -53,3 +79,21 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  rust-windows:
+    needs: changes
+    if: needs.changes.outputs.tauri == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: cargo test
+      - run: cargo clippy --all-targets -- -D warnings

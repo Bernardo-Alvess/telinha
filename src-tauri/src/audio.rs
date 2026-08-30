@@ -23,7 +23,8 @@ pub fn start_share_audio(
     stop: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
-        if run_capture(&app, &source_id, pid, &stop).is_err() {
+        if let Err(error) = run_capture(&app, &source_id, pid, &stop) {
+            let _ = app.emit("share-audio-error", error);
             emit_silence(&app, &stop);
         }
     });

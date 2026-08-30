@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  isDiscordRoomCode,
   isValidRoomCode,
   normalizeRoomCode,
   resolvePublicWsUrl,
@@ -14,17 +13,14 @@ describe("normalizeRoomCode", () => {
 });
 
 describe("isValidRoomCode", () => {
-  it("aceita códigos curtos gerados", () => {
-    expect(isValidRoomCode("AB12CD")).toBe(true);
-    expect(isValidRoomCode("ABCD")).toBe(true);
+  it("aceita códigos de seis caracteres do alfabeto gerado", () => {
+    expect(isValidRoomCode("AB23CD")).toBe(true);
   });
 
-  it("aceita códigos Discord", () => {
-    expect(isDiscordRoomCode("D123456789012345678")).toBe(true);
-    expect(isValidRoomCode("D123456789012345678")).toBe(true);
-  });
-
-  it("rejeita códigos curtos demais ou com lixo", () => {
+  it("rejeita código legado, tamanho incorreto ou caracteres ambíguos", () => {
+    expect(isValidRoomCode("D123456789012345678")).toBe(false);
+    expect(isValidRoomCode("ABCD")).toBe(false);
+    expect(isValidRoomCode("AB12CD")).toBe(false);
     expect(isValidRoomCode("AB")).toBe(false);
     expect(isValidRoomCode("")).toBe(false);
   });

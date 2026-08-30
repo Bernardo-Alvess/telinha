@@ -39,17 +39,18 @@ export function VolumeControl({ volume, onChange, onInteract }: VolumeControlPro
   }
 
   return (
-    <div className="discord-volume" onPointerDown={onInteract}>
+    <div className="watch-volume" onPointerDown={onInteract}>
       <button
         type="button"
-        className="discord-volume-btn"
+        className="watch-volume-btn"
         onClick={toggleMute}
         aria-label={volume === 0 ? "Ativar som" : "Silenciar"}
+        data-tooltip={volume === 0 ? "Ativar som" : "Volume"}
       >
         <SpeakerIcon volume={volume} />
       </button>
       <div
-        className="discord-volume-slider"
+        className="watch-volume-slider"
         role="slider"
         aria-label="Volume da transmissão"
         aria-valuemin={0}
@@ -69,12 +70,12 @@ export function VolumeControl({ volume, onChange, onInteract }: VolumeControlPro
       >
         <div
           ref={railRef}
-          className="discord-volume-rail"
+          className="watch-volume-rail"
           onPointerDown={onRailPointerDown}
           onPointerMove={onRailPointerMove}
         >
-          <span className="discord-volume-fill" style={{ height: `${volume}%` }} />
-          <span className="discord-volume-thumb" style={{ bottom: `${volume}%` }} />
+          <span className="watch-volume-fill" style={{ height: `${volume}%` }} />
+          <span className="watch-volume-thumb" style={{ bottom: `${volume}%` }} />
         </div>
       </div>
     </div>

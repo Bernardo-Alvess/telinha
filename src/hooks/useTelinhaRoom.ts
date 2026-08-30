@@ -2,17 +2,22 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { enterRoom, pingHealth, signalingUrl, type RoomSession } from "../lib/api";
+import { buildDiagnostics, recordDiagnostic } from "../lib/diagnostics";
 import { buildIceServers } from "../lib/ice";
+import { parseServerSignal, type ClientSignal } from "../lib/protocol";
 import { playStreamStarted, playViewerJoined } from "../lib/sounds";
-import { startDisplayMediaShare } from "../media/displayShare";
+import { needsNativeAudioLoopback, startDisplayMediaShare } from "../media/displayShare";
+import { isTauriRuntime } from "../lib/runtime";
 import { createShareAudioPump, createShareAudioTrack } from "../media/shareAudio";
+import { ConnectionState } from "./connectionState";
+import {
+  classifyConnectionQuality,
+  type ConnectionQuality,
+  type PeerHealthSample,
+} from "../room/connectionQuality";
+import { PeerManager } from "../room/peerManager";
 
-export enum ConnectionState {
-  Disconnected = "disconnected",
-  Connecting = "connecting",
-  Connected = "connected",
-  Reconnecting = "reconnecting",
-}
+export { ConnectionState } from "./connectionState";
 
 export interface ScreenShareInfo {
   participantIdentity: string;
@@ -25,6 +30,7 @@ export interface RoomPerson {
   name: string;
   isSharing: boolean;
   isLocal: boolean;
+  connected: boolean;
 }
 
 export interface ShareQuality {
@@ -33,33 +39,25 @@ export interface ShareQuality {
   maxHeight?: number;
   maxBitrate?: number;
   includeAudio: boolean;
-  useGpuEncode: boolean;
-}
-
-interface SignalMessage {
-  type: string;
-  from?: string;
-  to?: string;
-  sdp?: string;
-  candidate?: RTCIceCandidateInit;
-  message?: string;
-  you?: { id: string; name: string; sharing: boolean };
-  participant?: { id: string; name: string; sharing: boolean };
-  participants?: { id: string; name: string; sharing: boolean }[];
-  participantId?: string;
-  name?: string;
+  preferH264: boolean;
 }
 
 const ICE_SERVERS: RTCIceServer[] = buildIceServers(import.meta.env);
+const E2E_MEDIA = import.meta.env.DEV && import.meta.env.VITE_E2E_MEDIA === "1";
 const ICE_CONFIG: RTCConfiguration = {
-  iceServers: ICE_SERVERS,
-  iceCandidatePoolSize: 4,
+  iceServers: E2E_MEDIA ? [] : ICE_SERVERS,
+  iceCandidatePoolSize: E2E_MEDIA ? 0 : 4,
 };
 
 const VIDEO_MAX_BITRATE = 10_000_000;
-const AUDIO_MAX_BITRATE = 320_000;
 const P2P_BLOCKED_MESSAGE =
   "Não foi possível conectar direto. A rede pode estar bloqueando o P2P.";
+const MEDIA_RECOVERING_NETWORK = "A live não recebeu dados. Tentando reconectar...";
+const MEDIA_RECOVERING_CODEC = "A live chegou sem imagem. Tentando outro codec...";
+const MEDIA_STALLED_NETWORK =
+  "A rede não entregou o vídeo. Tente novamente; algumas redes exigem um servidor TURN.";
+const MEDIA_STALLED_CODEC =
+  "O vídeo chegou, mas não pôde ser decodificado. Tente novamente ou use uma qualidade menor.";
 const SIGNAL_PING_MS = 20_000;
 const HEALTH_PING_MS = 120_000;
 const MAX_RESEATS = 6;
@@ -69,8 +67,7 @@ export function useTelinhaRoom(
   options?: { onSessionRefresh?: (next: RoomSession) => void },
 ) {
   const wsRef = useRef<WebSocket | null>(null);
-  const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-  const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  const peerManagerRef = useRef<PeerManager | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
   const peopleRef = useRef<Map<string, RoomPerson>>(new Map());
@@ -79,8 +76,7 @@ export function useTelinhaRoom(
   const audioNodeRef = useRef<AudioNode | null>(null);
   const audioPortRef = useRef<MessagePort | null>(null);
   const sharingRef = useRef(false);
-  const useGpuEncodeRef = useRef(true);
-  const shareFpsRef = useRef(60);
+  const preferH264Ref = useRef(true);
   const shareBitrateRef = useRef(VIDEO_MAX_BITRATE);
   const stopShareRef = useRef<() => Promise<void>>(async () => undefined);
   const reseatCountRef = useRef(0);
@@ -95,6 +91,8 @@ export function useTelinhaRoom(
   const [watcherCounts, setWatcherCounts] = useState<Record<string, number>>({});
   const [watcherNames, setWatcherNames] = useState<Record<string, string[]>>({});
   const [error, setError] = useState<string | null>(null);
+  const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>("offline");
+  const [peerHealth, setPeerHealth] = useState<PeerHealthSample[]>([]);
   const watchersRef = useRef<Map<string, Map<string, string>>>(new Map());
 
   const publishPeople = useCallback(() => {
@@ -132,7 +130,7 @@ export function useTelinhaRoom(
     setScreenShares(shares);
   }, []);
 
-  const sendSignal = useCallback((payload: Record<string, unknown>) => {
+  const sendSignal = useCallback((payload: ClientSignal) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(payload));
@@ -140,146 +138,26 @@ export function useTelinhaRoom(
   }, []);
 
   const closePeer = useCallback((peerId: string) => {
-    const peer = peersRef.current.get(peerId);
-    if (peer) {
-      peer.onicecandidate = null;
-      peer.ontrack = null;
-      peer.close();
-      peersRef.current.delete(peerId);
-    }
-    pendingIceRef.current.delete(peerId);
+    peerManagerRef.current?.close(peerId);
     remoteStreamsRef.current.delete(peerId);
   }, []);
 
   const closeAllPeers = useCallback(() => {
-    for (const id of [...peersRef.current.keys()]) {
-      closePeer(id);
-    }
-  }, [closePeer]);
-
-  const applyBitrate = useCallback(async (peer: RTCPeerConnection) => {
-    preferVideoCodecs(peer, useGpuEncodeRef.current);
-    for (const sender of peer.getSenders()) {
-      const kind = sender.track?.kind;
-      if (kind !== "video" && kind !== "audio") continue;
-      const maxBitrate = kind === "video" ? shareBitrateRef.current : AUDIO_MAX_BITRATE;
-      const params = sender.getParameters();
-      params.degradationPreference = "maintain-framerate";
-      const encoding = {
-        maxBitrate,
-        ...(kind === "video" ? { priority: "high" as const } : {}),
-      };
-      params.encodings = params.encodings?.length
-        ? params.encodings.map((current) => ({
-            ...current,
-            ...encoding,
-          }))
-        : [encoding];
-      try {
-        await sender.setParameters(params);
-      } catch {
-      }
-    }
+    peerManagerRef.current?.closeAll();
   }, []);
-
-  const flushIce = useCallback(async (peerId: string, peer: RTCPeerConnection) => {
-    const queued = pendingIceRef.current.get(peerId) ?? [];
-    pendingIceRef.current.delete(peerId);
-    for (const candidate of queued) {
-      try {
-        await peer.addIceCandidate(candidate);
-      } catch {
-      }
-    }
-  }, []);
-
-  const getOrCreatePeer = useCallback(
-    (peerId: string, localId: string, localName: string) => {
-      const existing = peersRef.current.get(peerId);
-      if (existing && existing.connectionState !== "closed" && existing.connectionState !== "failed") {
-        return existing;
-      }
-      if (existing) {
-        closePeer(peerId);
-      }
-
-      const peer = new RTCPeerConnection(ICE_CONFIG);
-      peersRef.current.set(peerId, peer);
-      let iceRestarted = false;
-
-      peer.onicecandidate = (event) => {
-        if (event.candidate) {
-          sendSignal({ type: "ice", to: peerId, candidate: event.candidate.toJSON() });
-        }
-      };
-
-      peer.onconnectionstatechange = () => {
-        if (peer.connectionState === "connected") {
-          iceRestarted = false;
-          setError((current) => (current === P2P_BLOCKED_MESSAGE ? null : current));
-          return;
-        }
-        if (peer.connectionState !== "failed") {
-          return;
-        }
-        if (!iceRestarted && sharingRef.current) {
-          iceRestarted = true;
-          void (async () => {
-            try {
-              const offer = await peer.createOffer({ iceRestart: true });
-              await peer.setLocalDescription(offer);
-              sendSignal({ type: "offer", to: peerId, sdp: offer.sdp });
-            } catch {
-              setError(P2P_BLOCKED_MESSAGE);
-            }
-          })();
-          return;
-        }
-        setError(P2P_BLOCKED_MESSAGE);
-      };
-
-      peer.ontrack = (event) => {
-        markVideoMotion(event.track);
-        const [stream] = event.streams;
-        if (stream) {
-          remoteStreamsRef.current.set(peerId, stream);
-        } else {
-          const held = remoteStreamsRef.current.get(peerId) ?? new MediaStream();
-          held.addTrack(event.track);
-          remoteStreamsRef.current.set(peerId, held);
-        }
-        publishShares(localId, localName);
-      };
-
-      const local = localStreamRef.current;
-      if (local) {
-        for (const track of local.getTracks()) {
-          if (!peer.getSenders().some((sender) => sender.track === track)) {
-            peer.addTrack(track, local);
-          }
-        }
-        preferVideoCodecs(peer, useGpuEncodeRef.current);
-      }
-
-      return peer;
-    },
-    [closePeer, publishShares, sendSignal],
-  );
 
   const offerTo = useCallback(
-    async (peerId: string, localId: string, localName: string) => {
-      const peer = getOrCreatePeer(peerId, localId, localName);
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
-      sendSignal({ type: "offer", to: peerId, sdp: offer.sdp });
-      await applyBitrate(peer);
+    async (peerId: string, _localId: string, _localName: string) => {
+      await peerManagerRef.current?.offer(peerId);
     },
-    [applyBitrate, getOrCreatePeer, sendSignal],
+    [],
   );
 
   const offerToEveryone = useCallback(
     async (localId: string, localName: string) => {
-      const others = [...peopleRef.current.values()].filter((person) => !person.isLocal);
+      const others = [...peopleRef.current.values()].filter(
+        (person) => !person.isLocal && person.connected,
+      );
       await Promise.all(others.map((person) => offerTo(person.identity, localId, localName)));
     },
     [offerTo],
@@ -291,9 +169,12 @@ export function useTelinhaRoom(
     }
     unlistensRef.current = [];
     audioPortRef.current = null;
-    try {
-      await invoke("stop_share_capture");
-    } catch {
+    if (isTauriRuntime()) {
+      try {
+        await invoke("stop_share_capture");
+      } catch (error) {
+        recordDiagnostic("native-capture-stop-failed", { message: errorMessage(error) });
+      }
     }
 
     if (localStreamRef.current) {
@@ -310,14 +191,7 @@ export function useTelinhaRoom(
       audioContextRef.current = null;
     }
 
-    for (const peer of peersRef.current.values()) {
-      for (const sender of peer.getSenders()) {
-        try {
-          peer.removeTrack(sender);
-        } catch {
-        }
-      }
-    }
+    peerManagerRef.current?.removeLocalTracks();
 
     sharingRef.current = false;
     setIsSharing(false);
@@ -331,12 +205,65 @@ export function useTelinhaRoom(
     let closed = false;
     const localId = session.participantId;
     const localName = session.displayName;
+    const remoteStreams = remoteStreamsRef.current;
+    const watchers = watchersRef.current;
+    const peerManager = new PeerManager({
+      localId,
+      configuration: ICE_CONFIG,
+      getLocalStream: () => localStreamRef.current,
+      getVideoBitrate: () => shareBitrateRef.current,
+      preferH264: () => preferH264Ref.current,
+      send: sendSignal,
+      onRemoteStream: (peerId, stream) => {
+        remoteStreamsRef.current.set(peerId, stream);
+        publishShares(localId, localName);
+      },
+      onConnectionState: (peerId, state) => {
+        recordDiagnostic("peer-state", { peerId, state });
+        if (state === "connected") {
+          setError((current) => (current === P2P_BLOCKED_MESSAGE ? null : current));
+        } else if (state === "failed") {
+          setError(P2P_BLOCKED_MESSAGE);
+        }
+      },
+      onMediaStatus: (peerId, status) => {
+        recordDiagnostic("media-status", { peerId, status });
+        if (status === "receiving") {
+          setError((current) =>
+            [
+              MEDIA_RECOVERING_NETWORK,
+              MEDIA_RECOVERING_CODEC,
+              MEDIA_STALLED_NETWORK,
+              MEDIA_STALLED_CODEC,
+            ].includes(current ?? "")
+              ? null
+              : current,
+          );
+        } else if (status === "recovering-network") {
+          setError(MEDIA_RECOVERING_NETWORK);
+        } else if (status === "recovering-codec") {
+          setError(MEDIA_RECOVERING_CODEC);
+        } else if (status === "stalled-network") {
+          setError(MEDIA_STALLED_NETWORK);
+        } else {
+          setError(MEDIA_STALLED_CODEC);
+        }
+      },
+      onError: (message) => recordDiagnostic("peer-warning", { message }),
+    });
+    peerManagerRef.current = peerManager;
     setConnectionState(ConnectionState.Connecting);
     setError(null);
     peopleRef.current = new Map([
       [
         localId,
-        { identity: localId, name: localName, isSharing: false, isLocal: true },
+        {
+          identity: localId,
+          name: localName,
+          isSharing: false,
+          isLocal: true,
+          connected: true,
+        },
       ],
     ]);
     publishPeople();
@@ -366,16 +293,16 @@ export function useTelinhaRoom(
         return true;
       } catch (err) {
         reseating = false;
+        recordDiagnostic("seat-refresh-failed", { message: errorMessage(err) });
         setError(err instanceof Error ? err.message : "Não foi possível voltar para a sala.");
         return false;
       }
     };
 
     const handleMessage = async (event: MessageEvent) => {
-      let message: SignalMessage;
-      try {
-        message = JSON.parse(String(event.data)) as SignalMessage;
-      } catch {
+      const message = parseServerSignal(String(event.data));
+      if (!message) {
+        recordDiagnostic("invalid-server-signal");
         return;
       }
 
@@ -385,8 +312,12 @@ export function useTelinhaRoom(
 
       if (message.type === "error") {
         const text = message.message ?? "Erro na sala";
+        recordDiagnostic("server-error", { errorCode: message.code, message: text });
         setError(text);
-        if (text.includes("Sala inválida")) {
+        if (message.code === "update-required") {
+          fatal = true;
+          setConnectionState(ConnectionState.Disconnected);
+        } else if (text.includes("Sala inválida")) {
           const refreshed = await refreshSeat();
           if (refreshed) {
             return;
@@ -408,6 +339,7 @@ export function useTelinhaRoom(
               name: person.name,
               isSharing: person.sharing,
               isLocal: person.id === localId,
+              connected: person.connected ?? true,
             },
           ]),
         );
@@ -433,11 +365,31 @@ export function useTelinhaRoom(
           name: message.participant.name,
           isSharing: message.participant.sharing,
           isLocal: false,
+          connected: message.participant.connected ?? true,
         });
         publishPeople();
-        if (sharingRef.current) {
+        if (sharingRef.current && (message.participant.connected ?? true)) {
           await offerTo(message.participant.id, localId, localName);
         }
+        return;
+      }
+
+      if (message.type === "participant-presence") {
+        const person = peopleRef.current.get(message.participantId);
+        if (!person) return;
+        person.connected = message.connected;
+        if (!message.connected) {
+          closePeer(message.participantId);
+          remoteStreamsRef.current.delete(message.participantId);
+          for (const shareWatchers of watchersRef.current.values()) {
+            shareWatchers.delete(message.participantId);
+          }
+          publishWatchers();
+          publishShares(localId, localName);
+        } else if (sharingRef.current) {
+          await offerTo(message.participantId, localId, localName);
+        }
+        publishPeople();
         return;
       }
 
@@ -501,42 +453,17 @@ export function useTelinhaRoom(
       }
 
       if (message.type === "offer" && message.from && message.sdp) {
-        const peer = getOrCreatePeer(message.from, localId, localName);
-        await peer.setRemoteDescription({ type: "offer", sdp: message.sdp });
-        await flushIce(message.from, peer);
-        for (const receiver of peer.getReceivers()) {
-          markVideoMotion(receiver.track);
-        }
-        const answer = await peer.createAnswer();
-        await peer.setLocalDescription(answer);
-        sendSignal({ type: "answer", to: message.from, sdp: answer.sdp });
+        await peerManager.handleDescription(message.from, "offer", message.sdp);
         return;
       }
 
       if (message.type === "answer" && message.from && message.sdp) {
-        const peer = peersRef.current.get(message.from);
-        if (!peer) return;
-        await peer.setRemoteDescription({ type: "answer", sdp: message.sdp });
-        await flushIce(message.from, peer);
-        for (const receiver of peer.getReceivers()) {
-          markVideoMotion(receiver.track);
-        }
-        await applyBitrate(peer);
+        await peerManager.handleDescription(message.from, "answer", message.sdp);
         return;
       }
 
       if (message.type === "ice" && message.from && message.candidate) {
-        const peer = peersRef.current.get(message.from);
-        if (!peer || !peer.remoteDescription) {
-          const queued = pendingIceRef.current.get(message.from) ?? [];
-          queued.push(message.candidate);
-          pendingIceRef.current.set(message.from, queued);
-          return;
-        }
-        try {
-          await peer.addIceCandidate(message.candidate);
-        } catch {
-        }
+        await peerManager.handleIce(message.from, message.candidate);
       }
     };
 
@@ -546,6 +473,7 @@ export function useTelinhaRoom(
         if (!closed) {
           attempts = 0;
           setConnectionState(ConnectionState.Connecting);
+          recordDiagnostic("signal-open");
         }
         pingTimer = window.setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) {
@@ -554,20 +482,22 @@ export function useTelinhaRoom(
         }, SIGNAL_PING_MS);
       });
       socket.addEventListener("message", (event) => {
-        void handleMessage(event);
+        void handleMessage(event).catch((cause) => {
+          const message = errorMessage(cause);
+          recordDiagnostic("signal-handler-failed", { message });
+          setError("Falha ao processar a conexão da sala.");
+        });
       });
+      socket.addEventListener("error", () => recordDiagnostic("signal-transport-error"));
       socket.addEventListener("close", () => {
+        recordDiagnostic("signal-close", { attempts, fatal });
         if (pingTimer != null) {
           window.clearInterval(pingTimer);
         }
         if (closed || fatal || reseating) return;
         if (attempts >= 8) {
-          void refreshSeat().then((refreshed) => {
-            if (!refreshed && !closed) {
-              setConnectionState(ConnectionState.Disconnected);
-              setError("A conexão caiu e não foi possível reconectar.");
-            }
-          });
+          setConnectionState(ConnectionState.Disconnected);
+          setError("A conexão caiu e não foi possível reconectar.");
           return;
         }
         setConnectionState(ConnectionState.Reconnecting);
@@ -590,10 +520,34 @@ export function useTelinhaRoom(
       void pingHealth().catch(() => undefined);
     }, HEALTH_PING_MS);
     void pingHealth().catch(() => undefined);
+    const qualityTimer = window.setInterval(() => {
+      void peerManager.collectHealth().then((samples) => {
+        if (closed) return;
+        setPeerHealth(samples);
+        for (const sample of samples) {
+          recordDiagnostic("peer-health", {
+            peerId: sample.peerId,
+            connectionState: sample.connectionState,
+            roundTripTimeMs: sample.roundTripTimeMs,
+            packetLossPercent: sample.packetLossPercent,
+            bitrateKbps: sample.bitrateKbps,
+            codec: sample.codec,
+            bytesReceived: sample.bytesReceived,
+            bytesSent: sample.bytesSent,
+            framesDecoded: sample.framesDecoded,
+            candidateType: sample.candidateType,
+            transport: sample.transport,
+            localIceCandidates: sample.localIceCandidates,
+            remoteIceCandidates: sample.remoteIceCandidates,
+          });
+        }
+      });
+    }, 2_000);
 
     return () => {
       closed = true;
       window.clearInterval(healthTimer);
+      window.clearInterval(qualityTimer);
       if (reconnectTimer != null) {
         window.clearTimeout(reconnectTimer);
       }
@@ -602,28 +556,24 @@ export function useTelinhaRoom(
         socket.send(JSON.stringify({ type: "leave" }));
       }
       closeAllPeers();
+      if (peerManagerRef.current === peerManager) peerManagerRef.current = null;
       socket?.close();
       wsRef.current = null;
-      remoteStreamsRef.current.clear();
+      remoteStreams.clear();
       peopleRef.current.clear();
-      watchersRef.current.clear();
+      watchers.clear();
       setWatcherCounts({});
       setWatcherNames({});
       setScreenShares([]);
       setParticipants([]);
       setConnectionState(ConnectionState.Disconnected);
+      setConnectionQuality("offline");
+      setPeerHealth([]);
     };
   }, [
-    session?.code,
-    session?.participantId,
-    session?.token,
-    session?.wsUrl,
-    session?.displayName,
-    applyBitrate,
+    session,
     closeAllPeers,
     closePeer,
-    flushIce,
-    getOrCreatePeer,
     offerTo,
     onSessionRefresh,
     publishWatchers,
@@ -632,6 +582,14 @@ export function useTelinhaRoom(
     publishShares,
     sendSignal,
   ]);
+
+  useEffect(() => {
+    const next = classifyConnectionQuality(connectionState, peerHealth);
+    setConnectionQuality((current) => {
+      if (next !== current) recordDiagnostic("quality-change", { quality: next });
+      return next;
+    });
+  }, [connectionState, peerHealth]);
 
   useEffect(() => {
     return () => {
@@ -645,20 +603,29 @@ export function useTelinhaRoom(
 
       await cleanupNativeShare();
       setError(null);
-      useGpuEncodeRef.current = quality.useGpuEncode;
-      shareFpsRef.current = quality.fps;
+      preferH264Ref.current = quality.preferH264;
       shareBitrateRef.current = quality.maxBitrate ?? VIDEO_MAX_BITRATE;
 
       try {
         const stream = await startDisplayMediaShare(quality, sourceId);
 
-        if (quality.includeAudio && stream.getAudioTracks().length === 0) {
-          await attachLoopbackAudio(sourceId, {
-            unlistensRef,
-            audioContextRef,
-            audioNodeRef,
-            audioPortRef,
-          }, stream);
+        if (
+          needsNativeAudioLoopback(quality.includeAudio, stream.getAudioTracks().length)
+        ) {
+          await attachLoopbackAudio(
+            sourceId,
+            {
+              unlistensRef,
+              audioContextRef,
+              audioNodeRef,
+              audioPortRef,
+            },
+            stream,
+            (message) => {
+              recordDiagnostic("share-audio-failed", { message });
+              setError("O vídeo está no ar, mas o áudio do sistema não pôde ser capturado.");
+            },
+          );
         }
 
         stream.getVideoTracks()[0]?.addEventListener("ended", () => {
@@ -680,6 +647,7 @@ export function useTelinhaRoom(
         await offerToEveryone(session.participantId, session.displayName);
       } catch (error) {
         await cleanupNativeShare();
+        recordDiagnostic("share-start-failed", { message: errorMessage(error) });
         setError(error instanceof Error ? error.message : "Não foi possível compartilhar");
         throw error;
       }
@@ -726,6 +694,17 @@ export function useTelinhaRoom(
 
   stopShareRef.current = stopShare;
 
+  const retryConnections = useCallback(async () => {
+    setError(null);
+    recordDiagnostic("manual-media-retry");
+    try {
+      await peerManagerRef.current?.retryAll();
+    } catch (cause) {
+      recordDiagnostic("manual-media-retry-failed", { message: errorMessage(cause) });
+      setError("Não foi possível tentar novamente.");
+    }
+  }, []);
+
   return {
     connectionState,
     isSharing,
@@ -733,9 +712,12 @@ export function useTelinhaRoom(
     participants,
     watcherCounts,
     watcherNames,
+    connectionQuality,
+    copyDiagnostics: buildDiagnostics,
     startShare,
     stopShare,
     setWatchingShare,
+    retryConnections,
     error,
   };
 }
@@ -751,6 +733,7 @@ async function attachLoopbackAudio(
   sourceId: string,
   refs: AudioShareRefs,
   stream: MediaStream,
+  onError: (message: string) => void,
 ) {
   const audio = await createShareAudioTrack();
   if (!audio) return;
@@ -761,6 +744,9 @@ async function attachLoopbackAudio(
   refs.unlistensRef.current.push(await listen("share-audio", () => {
     void pumpAudio();
   }));
+  refs.unlistensRef.current.push(
+    await listen<string>("share-audio-error", (event) => onError(event.payload)),
+  );
   await invoke("start_share_capture", {
     id: sourceId,
     fps: 15,
@@ -773,36 +759,6 @@ async function attachLoopbackAudio(
   }
 }
 
-function markVideoMotion(track: MediaStreamTrack | null) {
-  if (track && track.kind === "video") {
-    track.contentHint = "motion";
-  }
-}
-
-function codecRank(codec: { mimeType: string; sdpFmtpLine?: string }, wanted: RegExp): number {
-  if (wanted.test(codec.mimeType)) {
-    const line = `${codec.sdpFmtpLine ?? ""}`;
-    if (/profile-level-id=64/i.test(line)) return 0;
-    if (/profile-level-id=4d/i.test(line)) return 1;
-    return 2;
-  }
-  if (/rtx|red|ulpfec/i.test(codec.mimeType)) return 20;
-  return 10;
-}
-
-function preferVideoCodecs(peer: RTCPeerConnection, useGpuEncode: boolean) {
-  const capabilities = RTCRtpSender.getCapabilities("video");
-  if (!capabilities) return;
-  const wanted = useGpuEncode ? /h264/i : /vp8/i;
-  const preferred = [...capabilities.codecs].sort(
-    (left, right) => codecRank(left, wanted) - codecRank(right, wanted),
-  );
-  for (const transceiver of peer.getTransceivers()) {
-    if (transceiver.sender.track?.kind === "video" || transceiver.receiver.track?.kind === "video") {
-      try {
-        transceiver.setCodecPreferences(preferred);
-      } catch {
-      }
-    }
-  }
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -3,9 +3,9 @@ import { actionFromUrls } from "./deepLink";
 
 describe("actionFromUrls", () => {
   it("escolhe o primeiro deep link válido", () => {
-    expect(actionFromUrls(["https://x", "telinha://join/AB12CD?name=Bia"])).toEqual({
+    expect(actionFromUrls(["https://x", "telinha://join/AB23CD?name=Bia"])).toEqual({
       action: "join",
-      code: "AB12CD",
+      code: "AB23CD",
       name: "Bia",
     });
   });

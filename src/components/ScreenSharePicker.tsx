@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { ShareQuality } from "../hooks/useTelinhaRoom";
+import { isTauriRuntime } from "../lib/runtime";
 
 interface ScreenSharePickerProps {
   onCancel: () => void;
@@ -63,6 +64,7 @@ function storedQualityIndex(): number {
 }
 
 export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps) {
+  const nativeRuntime = isTauriRuntime();
   const [qualityIndex, setQualityIndex] = useState(storedQualityIndex);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sharing, setSharing] = useState(false);
@@ -70,24 +72,29 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
     () => localStorage.getItem(AUDIO_KEY) !== "0",
   );
   const [gpuInfo, setGpuInfo] = useState<GpuEncodeInfo | null>(null);
-  const [useGpuEncode, setUseGpuEncode] = useState(
+  const [preferH264, setPreferH264] = useState(
     () => localStorage.getItem(GPU_KEY) !== "0",
   );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!nativeRuntime) {
+      setGpuInfo({ available: false, vendor: "browser", name: "" });
+      setPreferH264(false);
+      return;
+    }
     void invoke<GpuEncodeInfo>("gpu_encode_info")
       .then((info) => {
         setGpuInfo(info);
         if (!info.available) {
-          setUseGpuEncode(false);
+          setPreferH264(false);
         }
       })
       .catch(() => {
         setGpuInfo({ available: false, vendor: "none", name: "" });
-        setUseGpuEncode(false);
+        setPreferH264(false);
       });
-  }, []);
+  }, [nativeRuntime]);
 
   const quality = QUALITY_PRESETS[qualityIndex]!;
 
@@ -101,7 +108,7 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
         maxHeight: quality.maxHeight,
         maxBitrate: quality.maxBitrate,
         includeAudio,
-        useGpuEncode: Boolean(gpuInfo?.available && useGpuEncode),
+        preferH264: Boolean(gpuInfo?.available && preferH264),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Não foi possível compartilhar");
@@ -110,13 +117,17 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
   }
 
   return (
-    <div className="discord-picker">
+    <div className="share-picker">
       <header className="share-preflight-header">
         <span className="share-preflight-icon" aria-hidden="true" />
         <div>
           <span className="share-preflight-eyebrow">Pré-transmissão</span>
           <h1>Compartilhar tela</h1>
-          <p>O Windows mostrará aplicativos e monitores no próximo passo.</p>
+          <p>
+            {nativeRuntime
+              ? "O Windows mostrará aplicativos e monitores no próximo passo."
+              : "O navegador mostrará abas, janelas e monitores no próximo passo."}
+          </p>
         </div>
       </header>
 
@@ -162,7 +173,11 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
         <label className="share-setting share-toggle">
           <div className="share-setting-copy">
             <strong>Áudio do sistema</strong>
-            <span>A call do Discord fica fora da transmissão</span>
+            <span>
+              {nativeRuntime
+                ? "Inclui o som da tela; o áudio do Discord continua de fora"
+                : "Inclui áudio quando a fonte escolhida permitir"}
+            </span>
           </div>
           <span className="share-setting-control">
             <input
@@ -188,10 +203,10 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
           <span className="share-setting-control">
             <input
               type="checkbox"
-              checked={Boolean(gpuInfo?.available && useGpuEncode)}
+              checked={Boolean(gpuInfo?.available && preferH264)}
               disabled={!gpuInfo?.available}
               onChange={(event) => {
-                setUseGpuEncode(event.target.checked);
+                setPreferH264(event.target.checked);
                 localStorage.setItem(GPU_KEY, event.target.checked ? "1" : "0");
               }}
             />
@@ -202,9 +217,9 @@ export function ScreenSharePicker({ onCancel, onShare }: ScreenSharePickerProps)
 
       {error && <p className="share-preflight-error">{error}</p>}
 
-      <footer className="discord-picker-footer">
+      <footer className="share-picker-footer">
         <p>Você escolherá a fonte uma única vez.</p>
-        <div className="discord-actions">
+        <div className="share-picker-actions">
           <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={sharing}>
             Cancelar
           </button>

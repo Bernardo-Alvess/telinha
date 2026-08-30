@@ -4524,14 +4524,13 @@ dependencies = [
 
 [[package]]
 name = "telinha"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "discord-rich-presence",
  "image",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",

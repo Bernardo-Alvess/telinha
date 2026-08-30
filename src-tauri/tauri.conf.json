@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Telinha",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.telinha.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -40,10 +40,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": {
-      "resources/vencord-dist/*": "vencord-dist/",
-      "../vencord-plugin/telinha/*": "vencord-plugin/telinha/"
-    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -51,7 +47,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Complemento de tela para Discord",
-    "longDescription": "Compartilhe e assista telas por código de sala enquanto usa o Discord para voz e chat."
+    "shortDescription": "Compartilhamento de tela simples para Windows",
+    "longDescription": "Crie uma sala por código para compartilhar e assistir telas em uma janela leve."
   }
 }

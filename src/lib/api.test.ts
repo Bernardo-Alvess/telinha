@@ -1,19 +1,29 @@
-import { describe, expect, it } from "vitest";
-import { isDiscordRoomCode, parseTelinhaUrl, signalingUrl } from "./api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  UpdateRequiredError,
+  createRoom,
+  isValidRoomCode,
+  leaveRoomSession,
+  normalizeRoomCode,
+  parseTelinhaUrl,
+  signalingUrl,
+} from "./api";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("parseTelinhaUrl", () => {
   it("lê join com código e nome", () => {
-    expect(parseTelinhaUrl("telinha://join/AB12CD?name=Ana")).toEqual({
+    expect(parseTelinhaUrl("telinha://join/AB23CD?name=Ana")).toEqual({
       action: "join",
-      code: "AB12CD",
+      code: "AB23CD",
       name: "Ana",
     });
   });
 
-  it("sanitiza o código e reconhece share", () => {
-    expect(parseTelinhaUrl("telinha://join/ab-12")).toEqual({
+  it("normaliza um código válido e reconhece share", () => {
+    expect(parseTelinhaUrl("telinha://join/ab-23-cd")).toEqual({
       action: "join",
-      code: "AB12",
+      code: "AB23CD",
       name: undefined,
     });
     expect(parseTelinhaUrl("telinha://share")).toEqual({ action: "share" });
@@ -24,10 +34,16 @@ describe("parseTelinhaUrl", () => {
   });
 });
 
-describe("isDiscordRoomCode", () => {
-  it("distingue snowflake de código curto", () => {
-    expect(isDiscordRoomCode("D123456789012345678")).toBe(true);
-    expect(isDiscordRoomCode("AB12CD")).toBe(false);
+describe("código de sala", () => {
+  it("aceita somente seis caracteres do alfabeto Telinha", () => {
+    expect(normalizeRoomCode(" ab-23-cd ")).toBe("AB23CD");
+    expect(isValidRoomCode("AB23CD")).toBe(true);
+    expect(isValidRoomCode("AB12CD")).toBe(false);
+    expect(isValidRoomCode("D123456789012345678")).toBe(false);
+  });
+
+  it("não abre um convite com código inválido", () => {
+    expect(parseTelinhaUrl("telinha://join/AB12")).toEqual({ action: "open" });
   });
 });
 
@@ -39,10 +55,50 @@ describe("signalingUrl", () => {
       token: "secret",
       displayName: "Ana",
       wsUrl: "ws://localhost:3001/ws",
+      protocolVersion: 2,
     });
     const parsed = new URL(url);
     expect(parsed.searchParams.get("token")).toBe("secret");
     expect(parsed.searchParams.get("code")).toBe("AB12CD");
+    expect(parsed.searchParams.get("protocolVersion")).toBe("2");
+    expect(parsed.searchParams.get("appVersion")).toBe("0.2.0");
     expect(parsed.searchParams.has("name")).toBe(false);
+  });
+});
+
+describe("compatibilidade da API", () => {
+  it("envia metadados e traduz HTTP 426", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ code: "UPDATE_REQUIRED", error: "Atualize o Telinha." }),
+        { status: 426 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createRoom("Ana")).rejects.toBeInstanceOf(UpdateRequiredError);
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      displayName: "Ana",
+      protocolVersion: 2,
+      appVersion: "0.2.0",
+    });
+  });
+
+  it("confirma saída com token e requisição keepalive", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await leaveRoomSession({
+      code: "AB12CD",
+      participantId: "user-1",
+      token: "secret",
+      displayName: "Ana",
+      wsUrl: "ws://localhost:3001/ws",
+      protocolVersion: 2,
+    });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/rooms/AB12CD/participants/user-1");
+    expect(init).toMatchObject({ method: "DELETE", keepalive: true });
+    expect(init.headers).toEqual({ Authorization: "Bearer secret" });
   });
 });

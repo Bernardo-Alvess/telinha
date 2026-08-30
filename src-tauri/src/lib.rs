@@ -2,7 +2,6 @@ mod audio;
 mod capture;
 mod discord;
 mod gpu;
-mod vencord;
 
 #[cfg(windows)]
 mod webview_permissions;
@@ -77,7 +76,6 @@ pub fn run() {
             show_main_window,
             hide_main_window,
             quit_app,
-            vencord::install_vencord_plugin,
             discord::set_discord_presence,
             capture::list_share_sources,
             capture::resolve_share_source,
@@ -111,8 +109,7 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        capture::stop_share_capture();
-                        app.exit(0);
+                        let _ = app.emit("app-quit-requested", ());
                     }
                     _ => {}
                 })
