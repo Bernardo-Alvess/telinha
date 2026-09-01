@@ -16,13 +16,33 @@ const configuredMinProtocol = Number(
 const minProtocolVersion = Number.isInteger(configuredMinProtocol) && configuredMinProtocol > 0
   ? configuredMinProtocol
   : CURRENT_PROTOCOL_VERSION;
+const corsOrigins = process.env.CORS_ORIGINS
+  ?.split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
-const { http } = createTelinhaServer({
+const server = createTelinhaServer({
   publicWsUrl: process.env.WS_PUBLIC_URL,
   trustProxy: Boolean(process.env.RENDER || process.env.TRUST_PROXY === "1"),
   minProtocolVersion,
+  corsOrigins,
 });
 
-http.listen(PORT, HOST, () => {
+server.http.listen(PORT, HOST, () => {
   console.log(`Telinha server rodando em http://${HOST}:${PORT}`);
 });
+
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    await server.close();
+  } catch (error) {
+    console.error("Falha ao encerrar o servidor Telinha.", error);
+    process.exitCode = 1;
+  }
+}
+
+process.once("SIGINT", () => void shutdown());
+process.once("SIGTERM", () => void shutdown());

@@ -6,6 +6,7 @@ import {
   leaveRoomSession,
   normalizeRoomCode,
   parseTelinhaUrl,
+  signalingAuthentication,
   signalingUrl,
 } from "./api";
 
@@ -48,7 +49,47 @@ describe("código de sala", () => {
 });
 
 describe("signalingUrl", () => {
-  it("coloca token e id na query", () => {
+  const session = {
+    code: "AB12CD",
+    participantId: "user-1",
+    token: "secret",
+    displayName: "Ana",
+    wsUrl: "ws://localhost:3001/ws",
+    protocolVersion: 2,
+  } as const;
+
+  it("autentica clientes novos sem expor identidade ou token na URL", () => {
+    const url = signalingUrl({
+      ...session,
+      wsAuthMode: "message",
+    });
+    const parsed = new URL(url);
+    expect(parsed.searchParams.has("token")).toBe(false);
+    expect(parsed.searchParams.has("participantId")).toBe(false);
+    expect(parsed.searchParams.has("code")).toBe(false);
+    expect(parsed.searchParams.get("protocolVersion")).toBe("2");
+    expect(signalingAuthentication(session)).toEqual({
+      type: "authenticate",
+      code: "AB12CD",
+      participantId: "user-1",
+      token: "secret",
+      protocolVersion: 2,
+      appVersion: "0.2.0",
+    });
+  });
+
+  it("mantém a query antiga para sessões emitidas por servidores legados", () => {
+    const url = signalingUrl({
+      ...session,
+      wsAuthMode: "query",
+    });
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get("token")).toBe("secret");
+    expect(parsed.searchParams.get("participantId")).toBe("user-1");
+    expect(parsed.searchParams.get("code")).toBe("AB12CD");
+  });
+
+  it("preserva metadados públicos da conexão", () => {
     const url = signalingUrl({
       code: "AB12CD",
       participantId: "user-1",
@@ -56,10 +97,9 @@ describe("signalingUrl", () => {
       displayName: "Ana",
       wsUrl: "ws://localhost:3001/ws",
       protocolVersion: 2,
+      wsAuthMode: "message",
     });
     const parsed = new URL(url);
-    expect(parsed.searchParams.get("token")).toBe("secret");
-    expect(parsed.searchParams.get("code")).toBe("AB12CD");
     expect(parsed.searchParams.get("protocolVersion")).toBe("2");
     expect(parsed.searchParams.get("appVersion")).toBe("0.2.0");
     expect(parsed.searchParams.has("name")).toBe(false);

@@ -8,6 +8,15 @@ export interface SignalParticipant {
   connected: boolean;
 }
 
+export interface ClientAuthentication {
+  type: "authenticate";
+  code: string;
+  participantId: string;
+  token: string;
+  protocolVersion: number;
+  appVersion: string;
+}
+
 export type ClientSignal =
   | { type: "ping" | "leave" | "share-started" | "share-stopped" }
   | { type: "watch-started" | "watch-stopped"; to: string }

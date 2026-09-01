@@ -2,8 +2,7 @@ use tauri::webview::PlatformWebview;
 use webview2_com::{
     Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
-        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT,
-        COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
     },
     PermissionRequestedEventHandler,
 };
@@ -38,7 +37,18 @@ pub fn allow_media_capture(webview: &PlatformWebview) {
 }
 
 fn is_media_permission(kind: COREWEBVIEW2_PERMISSION_KIND) -> bool {
-    kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
-        || kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
-        || kind.0 > COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT.0
+    kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE || kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_only_microphone_and_camera_permissions() {
+        assert!(is_media_permission(COREWEBVIEW2_PERMISSION_KIND_MICROPHONE));
+        assert!(is_media_permission(COREWEBVIEW2_PERMISSION_KIND_CAMERA));
+        assert!(!is_media_permission(COREWEBVIEW2_PERMISSION_KIND(13)));
+        assert!(!is_media_permission(COREWEBVIEW2_PERMISSION_KIND(99)));
+    }
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_SIGNAL_PAYLOAD_BYTES,
   isProtocolError,
+  parseClientAuthentication,
   parseClientSignal,
   readProtocolVersion,
 } from "./protocol.js";
@@ -24,6 +25,39 @@ describe("protocolo de sinalização", () => {
         JSON.stringify({ type: "ice", to: peer, candidate: { candidate: "candidate:1" } }),
       ),
     ).toMatchObject({ type: "ice", to: peer });
+  });
+
+  it("valida autenticação enviada como primeira mensagem", () => {
+    expect(
+      parseClientAuthentication(
+        JSON.stringify({
+          type: "authenticate",
+          code: "AB23CD",
+          participantId: peer,
+          token: "abcdefghijklmnopqrstuvwxyz012345",
+          protocolVersion: 2,
+          appVersion: "0.2.0",
+        }),
+      ),
+    ).toMatchObject({
+      type: "authenticate",
+      code: "AB23CD",
+      participantId: peer,
+      protocolVersion: 2,
+    });
+    expect(
+      isProtocolError(
+        parseClientAuthentication(
+          JSON.stringify({
+            type: "authenticate",
+            code: "AB23CD",
+            participantId: peer,
+            token: "curto",
+            protocolVersion: 2,
+          }),
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("rejeita destinatário, JSON e payload excessivo", () => {

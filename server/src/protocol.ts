@@ -2,8 +2,19 @@ export const CURRENT_PROTOCOL_VERSION = 2;
 export const MAX_SIGNAL_PAYLOAD_BYTES = 64 * 1024;
 
 const PARTICIPANT_ID = /^user-[a-f0-9]{32}$/;
+const ROOM_CODE = /^[A-Z0-9]{6}$/;
+const SESSION_TOKEN = /^[A-Za-z0-9_-]{32}$/;
 const MAX_SDP_LENGTH = 60 * 1024;
 const MAX_CANDIDATE_LENGTH = 8 * 1024;
+
+export interface ClientAuthentication {
+  type: "authenticate";
+  code: string;
+  participantId: string;
+  token: string;
+  protocolVersion: number;
+  appVersion?: string;
+}
 
 export type ClientSignal =
   | { type: "ping" | "leave" | "share-started" | "share-stopped" }
@@ -19,6 +30,44 @@ export interface ProtocolError {
 
 export function readProtocolVersion(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : 0;
+}
+
+export function parseClientAuthentication(
+  raw: string,
+): ClientAuthentication | ProtocolError {
+  if (Buffer.byteLength(raw, "utf8") > MAX_SIGNAL_PAYLOAD_BYTES) {
+    return { code: "payload-too-large", message: "Mensagem de autenticação muito grande." };
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { code: "invalid-json", message: "Autenticação inválida." };
+  }
+  if (
+    !isRecord(value) ||
+    value.type !== "authenticate" ||
+    typeof value.code !== "string" ||
+    !ROOM_CODE.test(value.code) ||
+    !validParticipantId(value.participantId) ||
+    typeof value.token !== "string" ||
+    !SESSION_TOKEN.test(value.token) ||
+    readProtocolVersion(value.protocolVersion) === 0 ||
+    (value.appVersion !== undefined &&
+      (typeof value.appVersion !== "string" || value.appVersion.length > 32))
+  ) {
+    return { code: "invalid-message", message: "Autenticação inválida." };
+  }
+
+  return {
+    type: "authenticate",
+    code: value.code,
+    participantId: value.participantId,
+    token: value.token,
+    protocolVersion: readProtocolVersion(value.protocolVersion),
+    appVersion: value.appVersion,
+  };
 }
 
 export function parseClientSignal(raw: string): ClientSignal | ProtocolError {

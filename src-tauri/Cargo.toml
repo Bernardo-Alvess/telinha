@@ -1,8 +1,11 @@
 [package]
 name = "telinha"
 version = "0.2.0"
-description = "Complemento de tela para Discord"
-authors = ["you"]
+description = "Aplicativo de compartilhamento de tela P2P para Windows"
+authors = ["llorenzocardoso"]
+license = "MIT"
+repository = "https://github.com/llorenzocardoso/telinha"
+homepage = "https://github.com/llorenzocardoso/telinha"
 edition = "2021"
 
 [lib]

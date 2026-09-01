@@ -1,4 +1,8 @@
-import { APP_VERSION, PROTOCOL_VERSION } from "./protocol";
+import {
+  APP_VERSION,
+  PROTOCOL_VERSION,
+  type ClientAuthentication,
+} from "./protocol";
 
 export const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 
@@ -9,6 +13,7 @@ export interface RoomSession {
   displayName: string;
   wsUrl: string;
   protocolVersion: number;
+  wsAuthMode?: "message" | "query";
 }
 
 export class RoomNotFoundError extends Error {
@@ -44,12 +49,25 @@ export function isValidRoomCode(code: string): boolean {
 
 export function signalingUrl(session: RoomSession): string {
   const url = new URL(session.wsUrl);
-  url.searchParams.set("code", session.code);
-  url.searchParams.set("participantId", session.participantId);
-  url.searchParams.set("token", session.token);
   url.searchParams.set("protocolVersion", String(PROTOCOL_VERSION));
   url.searchParams.set("appVersion", APP_VERSION);
+  if (session.wsAuthMode !== "message") {
+    url.searchParams.set("code", session.code);
+    url.searchParams.set("participantId", session.participantId);
+    url.searchParams.set("token", session.token);
+  }
   return url.toString();
+}
+
+export function signalingAuthentication(session: RoomSession): ClientAuthentication {
+  return {
+    type: "authenticate",
+    code: session.code,
+    participantId: session.participantId,
+    token: session.token,
+    protocolVersion: PROTOCOL_VERSION,
+    appVersion: APP_VERSION,
+  };
 }
 
 async function readJson(response: Response): Promise<Record<string, unknown>> {
@@ -66,7 +84,7 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 }
 
 function parseRoomSession(data: Record<string, unknown>): RoomSession {
-  const { code, participantId, token, displayName, wsUrl, protocolVersion } = data;
+  const { code, participantId, token, displayName, wsUrl, protocolVersion, wsAuthMode } = data;
   if (
     typeof code !== "string" ||
     typeof participantId !== "string" ||
@@ -87,6 +105,7 @@ function parseRoomSession(data: Record<string, unknown>): RoomSession {
     displayName,
     wsUrl,
     protocolVersion: typeof protocolVersion === "number" ? protocolVersion : 1,
+    wsAuthMode: wsAuthMode === "message" ? "message" : "query",
   };
 }
 

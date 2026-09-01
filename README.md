@@ -1,111 +1,197 @@
-# Telinha
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" width="112" alt="Ícone do Telinha">
+</p>
 
-Aplicativo leve de compartilhamento de tela para Windows. Crie uma sala por código, compartilhe uma tela e assista em uma janela separada, sem precisar criar conta.
+<h1 align="center">Telinha</h1>
 
-O Telinha pode acompanhar a chamada que você já usa. Quando o áudio da tela está ativo, ele exclui o processo do Discord para impedir que a voz da chamada volte na transmissão.
+<p align="center">
+  Compartilhamento de tela P2P para Windows, sem conta e sem complicação.
+</p>
+
+<p align="center">
+  <a href="https://github.com/llorenzocardoso/telinha/actions/workflows/ci.yml"><img src="https://github.com/llorenzocardoso/telinha/actions/workflows/ci.yml/badge.svg" alt="Status do CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licen%C3%A7a-MIT-22c55e" alt="Licença MIT"></a>
+  <img src="https://img.shields.io/badge/plataforma-Windows-2563eb" alt="Plataforma Windows">
+  <img src="https://img.shields.io/badge/Tauri-2-24c8db" alt="Tauri 2">
+</p>
+
+O Telinha cria salas temporárias por código para compartilhar e assistir telas em uma janela leve. O áudio e o vídeo trafegam entre os participantes por WebRTC; o servidor cuida apenas da criação das salas e da sinalização necessária para estabelecer as conexões.
+
+## Visão geral
+
+| Início | Transmissão |
+| --- | --- |
+| ![Tela inicial do Telinha](docs/screenshots/telinha-home.png) | ![Transmissão no Telinha](docs/screenshots/telinha-live.png) |
+
+### Principais recursos
+
+- salas temporárias com código de seis caracteres;
+- entrada sem cadastro, usando apenas um nome;
+- compartilhamento de tela com captura e codificação pelo Chromium;
+- áudio do sistema por loopback nativo no app Windows;
+- mais de uma transmissão simultânea, com visualização em grade;
+- reconexão automática e recuperação de sessões recentes;
+- indicadores de qualidade da conexão e diagnóstico local sanitizado;
+- atalhos globais, bandeja do sistema e deep links.
 
 ## Como funciona
 
-1. Alguém abre o Telinha e clica **Criar sala**.
-2. Copia o código e envia para as outras pessoas.
-3. Cada pessoa abre o Telinha, cola o código e entra.
-4. Qualquer pessoa pode clicar **Compartilhar tela** (ou `Ctrl+Shift+S`).
+1. Uma pessoa cria a sala e compartilha o código.
+2. Os demais participantes entram com esse código e um nome.
+3. Qualquer participante pode iniciar uma transmissão com **Compartilhar tela** ou `Ctrl+Shift+S`.
+4. O seletor nativo do WebView2 escolhe a janela ou o monitor, e o WebRTC conecta os participantes.
 
-O Telinha abre diretamente o seletor seguro do Windows uma única vez. O vídeo usa `getDisplayMedia` do Chromium para capturar e codificar pela GPU, sem passar pelo pipeline JPEG. O áudio usa o loopback por processo do Windows para excluir a árvore do Discord e evitar que a call volte na live.
-
-O vídeo vai do PC de quem compartilha direto para os amigos (WebRTC). O servidor só troca o código da sala e o handshake.
-
-O Telinha não modifica o Discord nem instala builds customizadas do Vencord.
-
-## Pré-requisitos
-
-- Windows
-- [Node.js](https://nodejs.org/) 20+
-- [Rust](https://rustup.rs/)
-
-## Configuração
-
-```bash
-cp .env.example .env
-cp server/.env.example server/.env
+```mermaid
+flowchart LR
+    A[Telinha — participante A] -. criação da sala e sinalização .-> S[Servidor Telinha]
+    B[Telinha — participante B] -. entrada e sinalização .-> S
+    A <== áudio e vídeo via WebRTC ==> B
 ```
 
-No `.env` do app, `VITE_API_URL=http://localhost:3001` serve para desenvolver. O `tauri build` usa `.env.production` (servidor público). Para um `.exe` apontando para localhost, `VITE_ALLOW_LOCAL_API=1`.
+O servidor de sinalização não recebe o conteúdo da tela. Quando uma conexão direta não é possível, um servidor TURN pode retransmitir a mídia, que continua protegida pelo transporte do WebRTC.
 
-TURN próprio é opcional (`VITE_TURN_URL`, `VITE_TURN_USERNAME`, `VITE_TURN_CREDENTIAL`). Enquanto
-ele não estiver configurado, o app usa STUN e um relay público apenas como tentativa. Redes com CGNAT,
-firewall corporativo ou UDP bloqueado ainda podem impedir a live; nesse caso o app mostra a falha e
-permite copiar as métricas em vez de permanecer indefinidamente em uma tela preta.
+## Instalação
 
-No servidor, `WS_PUBLIC_URL` fixa a URL pública do WebSocket. `TRUST_PROXY=1` só se estiver atrás de um proxy.
-`MIN_PROTOCOL_VERSION` controla a versão mínima aceita pelo HTTP e WebSocket e usa `2` por padrão.
+1. Acesse a página de [Releases](https://github.com/llorenzocardoso/telinha/releases).
+2. Baixe o instalador `.exe` ou `.msi` mais recente.
+3. Instale e abra o Telinha no Windows.
 
-Não commite `.env` com credenciais.
+O projeto ainda está em desenvolvimento ativo. Caso não exista uma release pública, use as instruções de desenvolvimento abaixo.
 
-## Desenvolvimento
+## Desenvolvimento local
 
-Terminal 1 — servidor de salas:
+### Pré-requisitos
 
-```bash
-cd server && npm install && npm run dev
+- Windows 10 ou 11;
+- [Node.js](https://nodejs.org/) 20 ou superior;
+- [Rust](https://rustup.rs/) com o toolchain MSVC;
+- Microsoft Edge WebView2 Runtime.
+
+### Preparação
+
+```powershell
+git clone https://github.com/llorenzocardoso/telinha.git
+Set-Location telinha
+npm ci
+npm ci --prefix server
+Copy-Item .env.example .env
+Copy-Item server/.env.example server/.env
 ```
 
-Terminal 2 — app desktop:
+Para iniciar o servidor e o aplicativo desktop juntos:
 
-```bash
-npm install && npm run tauri dev
+```powershell
+npm run dev:all
 ```
 
-Ou tudo junto:
+Para testar somente a interface web com duas janelas do navegador:
 
-```bash
-npm install && cd server && npm install && cd .. && npm run dev:all
+```powershell
+npm run dev:solo
 ```
 
-### Teste solo com dois usuários
+Abra `http://127.0.0.1:1420` em duas janelas anônimas separadas. No navegador, deixe o áudio do sistema desativado: o loopback nativo existe apenas no aplicativo Windows.
 
-Execute `npm run dev:solo`, abra `http://127.0.0.1:1420` em duas janelas anônimas separadas e use
-um nome em cada uma. Também é possível usar o app Tauri como o primeiro usuário e o navegador como
-o segundo. No navegador, deixe o áudio do sistema desativado; o loopback que exclui o Discord só
-existe no aplicativo Windows.
+### Variáveis de ambiente
 
-Para executar o fluxo automatizado com mídia sintética:
+| Variável | Onde | Finalidade |
+| --- | --- | --- |
+| `VITE_API_URL` | aplicativo | URL HTTP pública do servidor de sinalização |
+| `VITE_ALLOW_LOCAL_API` | aplicativo | permite gerar um build de produção apontando para localhost quando vale `1` |
+| `VITE_TURN_URL` | aplicativo | URL de um servidor TURN próprio |
+| `VITE_TURN_USERNAME` | aplicativo | usuário do TURN próprio |
+| `VITE_TURN_CREDENTIAL` | aplicativo | credencial do TURN próprio |
+| `PORT` / `HOST` | servidor | endereço em que o servidor HTTP escuta |
+| `WS_PUBLIC_URL` | servidor | URL pública fixa do WebSocket |
+| `TRUST_PROXY` | servidor | habilita confiança no primeiro proxy quando vale `1` |
+| `CORS_ORIGINS` | servidor | origens web adicionais, separadas por vírgula |
+| `MIN_PROTOCOL_VERSION` | servidor | menor versão do protocolo aceita pelo HTTP e WebSocket |
 
-```bash
-npm run test:e2e
-```
+Nunca versione arquivos `.env` com credenciais. O `.env.production` do repositório contém apenas a URL pública usada no build oficial.
 
-## Testes
+## Testes e qualidade
 
-```bash
-npm test
-npm run test:e2e
+```powershell
 npm run lint
-cd server && npm test && npm run lint
-cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+npm test
+npm run build
+npm run test:e2e
+
+npm run lint --prefix server
+npm test --prefix server
+npm run build --prefix server
+
+cargo fmt --check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-O CI sempre roda `cargo fmt --check`. Quando arquivos do Tauri mudam, um job Windows adicional
-executa os testes Rust e `cargo clippy --all-targets -- -D warnings`.
+O CI executa lint, testes e builds de frontend e servidor, o fluxo E2E e a formatação Rust. Alterações no Tauri também ativam testes e Clippy em um runner Windows.
 
-## Conexão e diagnóstico
+## Estrutura do projeto
 
-A sala mostra um estado simples de conexão: boa, instável, reconectando ou sem conexão. Em caso
-de erro, **Copiar diagnóstico** gera um relatório local com estados e métricas WebRTC. O relatório
-não inclui token, código da sala, nomes, SDP, candidatos ICE nem endereços de rede.
-O relatório inclui versão do app, codec, bytes, frames decodificados e o tipo de rota ICE, sem expor IPs.
-
-## Build Windows
-
-```bash
-npm run tauri build
+```text
+src/          interface React, WebRTC e gerenciamento das salas
+server/       servidor HTTP e WebSocket de sinalização
+src-tauri/    shell desktop, captura de áudio e integrações do Windows
+e2e/          fluxo automatizado com Playwright e mídia sintética
+.github/      CI e geração dos instaladores Windows
 ```
 
-O instalador `.msi` / `.exe` fica em `src-tauri/target/release/bundle/`.
+### Stack
 
-Para gerar o instalador no GitHub sem commitar um release automático: **Actions → Release Windows → Run workflow**. O `.msi` e o `.exe` ficam nos artifacts do run e também num draft em Releases.
+- React 19, TypeScript e Vite;
+- Tauri 2 e Rust;
+- WebRTC para mídia P2P;
+- Express e `ws` para sinalização;
+- Vitest e Playwright para testes.
 
-## Atalhos
+## Privacidade e diagnóstico
 
-- `Ctrl+Shift+S` — iniciar/parar compartilhamento de tela
-- Ícone na bandeja — mostrar a janela ou sair do app
+- não existem contas ou banco de dados;
+- salas, participantes e limites de requisição ficam somente na memória do servidor;
+- áudio e vídeo não passam pelo servidor de sinalização;
+- o relatório de diagnóstico omite token, código da sala, nomes, SDP, candidatos ICE, IPs e endereços de rede;
+- o relatório inclui apenas versão, estados de conexão, codec, volume de dados, frames e tipo de rota ICE.
+
+## Limitações conhecidas
+
+- o aplicativo desktop e a captura nativa de áudio são específicos do Windows;
+- redes com CGNAT, firewall restritivo ou UDP bloqueado podem exigir um TURN próprio;
+- o relay público configurado como fallback é uma tentativa de conectividade, não uma garantia de disponibilidade;
+- as salas são efêmeras e desaparecem quando o servidor reinicia ou após o período de retenção.
+
+## Build para Windows
+
+```powershell
+npm run build:desktop
+```
+
+Os instaladores são gerados em `src-tauri/target/release/bundle/`. Também é possível executar manualmente **Actions → Release Windows → Run workflow**; o workflow cria um draft em Releases e publica `.msi` e `.exe` como artifacts.
+
+## Deploy do servidor
+
+O arquivo [`render.yaml`](render.yaml) permite criar o servidor no Render. Para outro provedor, execute dentro de `server/`:
+
+```powershell
+npm ci
+npm run build
+npm start
+```
+
+Em produção, configure `WS_PUBLIC_URL`, `MIN_PROTOCOL_VERSION` e `TRUST_PROXY` de acordo com a infraestrutura. Para redes restritivas, forneça também um TURN próprio no build do aplicativo.
+
+## Contribuindo
+
+Issues e pull requests são bem-vindos. Antes de enviar uma alteração:
+
+1. mantenha a mudança focada e explique o comportamento afetado;
+2. inclua ou atualize testes quando houver mudança de lógica;
+3. execute os comandos de qualidade relevantes;
+4. não inclua códigos de sala, tokens, IPs ou credenciais em logs e screenshots.
+
+## Licença
+
+Distribuído sob a licença [MIT](LICENSE).
+
+Feito por [llorenzocardoso](https://github.com/llorenzocardoso).

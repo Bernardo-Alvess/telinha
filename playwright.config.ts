@@ -21,22 +21,25 @@ export default defineConfig({
     trace: "retain-on-failure",
     ...devices["Desktop Chrome"],
   },
-  webServer: [
-    {
-      command: "npm run e2e:server",
-      url: "http://127.0.0.1:3001/health",
-      reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
-    },
-    {
-      command: "npm run dev -- --host 127.0.0.1",
-      url: "http://127.0.0.1:1420",
-      reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
-      env: {
-        VITE_API_URL: "http://127.0.0.1:3001",
-        VITE_E2E_MEDIA: "1",
-      },
-    },
-  ],
+  webServer:
+    process.env.PLAYWRIGHT_EXTERNAL_SERVERS === "1"
+      ? undefined
+      : [
+          {
+            command: "node server/dist/index.js",
+            url: "http://127.0.0.1:3001/health",
+            reuseExistingServer: !process.env.CI,
+            timeout: 30_000,
+          },
+          {
+            command: "node node_modules/vite/bin/vite.js --host 127.0.0.1",
+            url: "http://127.0.0.1:1420",
+            reuseExistingServer: !process.env.CI,
+            timeout: 30_000,
+            env: {
+              VITE_API_URL: "http://127.0.0.1:3001",
+              VITE_E2E_MEDIA: "1",
+            },
+          },
+        ],
 });

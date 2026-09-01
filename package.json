@@ -2,6 +2,15 @@
   "name": "telinha",
   "private": true,
   "version": "0.2.0",
+  "description": "Compartilhamento de tela P2P para Windows, sem conta e sem complicação.",
+  "author": "llorenzocardoso",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/llorenzocardoso/telinha.git"
+  },
+  "homepage": "https://github.com/llorenzocardoso/telinha#readme",
+  "bugs": "https://github.com/llorenzocardoso/telinha/issues",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,9 +18,9 @@
     "build:desktop": "npx tauri build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:e2e": "playwright test",
-    "e2e:server": "npm run build --prefix server && npm start --prefix server",
-    "lint": "eslint src",
+    "test:e2e": "npm run build --prefix server && node scripts/run-e2e.mjs",
+    "e2e:server": "node server/dist/index.js",
+    "lint": "eslint src playwright.config.ts scripts",
     "tauri": "npx tauri",
     "server": "npm run dev --prefix server",
     "dev:all": "concurrently \"npm run server\" \"npm run tauri dev\"",

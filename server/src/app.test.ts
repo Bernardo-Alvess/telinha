@@ -11,6 +11,7 @@ interface RoomSession {
   displayName: string;
   wsUrl: string;
   protocolVersion?: number;
+  wsAuthMode?: "message" | "query";
 }
 
 async function listen(publicWsUrl?: string): Promise<{ server: TelinhaServer; base: string }> {
@@ -45,6 +46,31 @@ function signalingUrl(session: RoomSession): string {
     url.searchParams.set("protocolVersion", String(session.protocolVersion));
   }
   return url.toString();
+}
+
+function authenticatedSocket(
+  session: RoomSession,
+  origin?: string,
+): { socket: WebSocket; url: URL } {
+  const url = new URL(session.wsUrl);
+  url.searchParams.set(
+    "protocolVersion",
+    String(session.protocolVersion ?? CURRENT_PROTOCOL_VERSION),
+  );
+  const socket = new WebSocket(url, origin ? { headers: { Origin: origin } } : undefined);
+  socket.once("open", () => {
+    socket.send(
+      JSON.stringify({
+        type: "authenticate",
+        code: session.code,
+        participantId: session.participantId,
+        token: session.token,
+        protocolVersion: session.protocolVersion ?? CURRENT_PROTOCOL_VERSION,
+        appVersion: "0.2.0",
+      }),
+    );
+  });
+  return { socket, url };
 }
 
 function waitMessage(ws: WebSocket): Promise<Record<string, unknown>> {
@@ -100,6 +126,7 @@ describe("telinha server", () => {
     expect(created.response.status).toBe(200);
     expect(created.data.code).toMatch(/^[A-Z0-9]{6}$/);
     expect(created.data.token).toEqual(expect.any(String));
+    expect(created.data.wsAuthMode).toBe("message");
 
     const missing = await postJson(`${base}/rooms/ZZZZZZ/join`, { displayName: "Bia" });
     expect(missing.response.status).toBe(404);
@@ -169,6 +196,52 @@ describe("telinha server", () => {
     const hello = await waitMessage(good);
     expect(hello.type).toBe("hello");
     good.close();
+  });
+
+  it("autentica por mensagem sem colocar identidade ou token na URL", async () => {
+    const { server, base } = await listen();
+    running = server;
+    const { data } = await postJson(`${base}/rooms`, { displayName: "Ana" });
+    const session = data as unknown as RoomSession;
+
+    const { socket, url } = authenticatedSocket(session);
+    expect(url.searchParams.has("token")).toBe(false);
+    expect(url.searchParams.has("participantId")).toBe(false);
+    expect(url.searchParams.has("code")).toBe(false);
+    const hello = await waitMessage(socket);
+    expect(hello.type, JSON.stringify(hello)).toBe("hello");
+    socket.close();
+  });
+
+  it("restringe CORS e a origem do WebSocket sem bloquear Tauri", async () => {
+    const { server, base } = await listen();
+    running = server;
+
+    const allowed = await fetch(`${base}/health`, {
+      headers: { Origin: "http://tauri.localhost" },
+    });
+    expect(allowed.headers.get("access-control-allow-origin")).toBe(
+      "http://tauri.localhost",
+    );
+
+    const blocked = await fetch(`${base}/health`, {
+      headers: { Origin: "https://example.invalid" },
+    });
+    expect(blocked.headers.has("access-control-allow-origin")).toBe(false);
+
+    const { data } = await postJson(`${base}/rooms`, { displayName: "Ana" });
+    const session = data as unknown as RoomSession;
+    const denied = authenticatedSocket(session, "https://example.invalid").socket;
+    await expect(waitMessage(denied)).resolves.toMatchObject({
+      type: "error",
+      code: "origin-not-allowed",
+    });
+    denied.close();
+
+    const accepted = authenticatedSocket(session, "http://tauri.localhost").socket;
+    const hello = await waitMessage(accepted);
+    expect(hello.type, JSON.stringify(hello)).toBe("hello");
+    accepted.close();
   });
 
   it("remove participante por HTTP com token e mantém a saída idempotente", async () => {

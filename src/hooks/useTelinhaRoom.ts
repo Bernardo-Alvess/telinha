@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { enterRoom, pingHealth, signalingUrl, type RoomSession } from "../lib/api";
+import {
+  enterRoom,
+  pingHealth,
+  signalingAuthentication,
+  signalingUrl,
+  type RoomSession,
+} from "../lib/api";
 import { buildDiagnostics, recordDiagnostic } from "../lib/diagnostics";
 import { buildIceServers } from "../lib/ice";
 import { parseServerSignal, type ClientSignal } from "../lib/protocol";
@@ -470,6 +476,9 @@ export function useTelinhaRoom(
     const attachSocket = (socket: WebSocket) => {
       let pingTimer: number | undefined;
       socket.addEventListener("open", () => {
+        if (session.wsAuthMode === "message") {
+          socket.send(JSON.stringify(signalingAuthentication(session)));
+        }
         if (!closed) {
           attempts = 0;
           setConnectionState(ConnectionState.Connecting);
