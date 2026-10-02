@@ -74,7 +74,7 @@ describe("signalingUrl", () => {
       participantId: "user-1",
       token: "secret",
       protocolVersion: 2,
-      appVersion: "0.2.0",
+      appVersion: "0.3.0",
     });
   });
 
@@ -101,7 +101,7 @@ describe("signalingUrl", () => {
     });
     const parsed = new URL(url);
     expect(parsed.searchParams.get("protocolVersion")).toBe("2");
-    expect(parsed.searchParams.get("appVersion")).toBe("0.2.0");
+    expect(parsed.searchParams.get("appVersion")).toBe("0.3.0");
     expect(parsed.searchParams.has("name")).toBe(false);
   });
 });
@@ -121,7 +121,7 @@ describe("compatibilidade da API", () => {
     expect(JSON.parse(String(init.body))).toMatchObject({
       displayName: "Ana",
       protocolVersion: 2,
-      appVersion: "0.2.0",
+      appVersion: "0.3.0",
     });
   });
 

@@ -62,8 +62,18 @@ class MockPeerConnection {
     this.closed += 1;
     this.connectionState = "closed";
   }
+  configuration: RTCConfiguration = {};
+
   async getStats() {
     return this.stats as unknown as RTCStatsReport;
+  }
+
+  setConfiguration(configuration: RTCConfiguration) {
+    this.configuration = configuration;
+  }
+
+  getConfiguration() {
+    return this.configuration;
   }
 }
 
@@ -154,5 +164,25 @@ describe("PeerManager", () => {
     await peers.collectHealth();
     expect(onMediaStatus).toHaveBeenCalledWith("user-a", "recovering-network");
     expect(connection.localDescriptions[connection.localDescriptions.length - 1]?.type).toBe("offer");
+  });
+
+  it("conta candidatos por tipo e força relay no primeiro failed", async () => {
+    const peers = manager(() => null);
+    await peers.handleIce("user-a", {
+      candidate: "candidate:1 1 udp 2122260223 1.2.3.4 9 typ host",
+    });
+    const [sample] = await peers.collectHealth();
+    expect(sample?.remoteHostCandidates).toBe(1);
+    expect(sample?.remoteRelayCandidates).toBe(0);
+
+    const connection = created[0]!;
+    connection.connectionState = "failed";
+    connection.onconnectionstatechange?.call(
+      connection as unknown as RTCPeerConnection,
+      new Event("connectionstatechange"),
+    );
+    await vi.waitFor(() => {
+      expect(connection.configuration.iceTransportPolicy).toBe("relay");
+    });
   });
 });

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   enterRoom,
+  fetchIceServers,
   pingHealth,
   signalingAuthentication,
   signalingUrl,
@@ -48,12 +49,15 @@ export interface ShareQuality {
   preferH264: boolean;
 }
 
-const ICE_SERVERS: RTCIceServer[] = buildIceServers(import.meta.env);
 const E2E_MEDIA = import.meta.env.DEV && import.meta.env.VITE_E2E_MEDIA === "1";
-const ICE_CONFIG: RTCConfiguration = {
-  iceServers: E2E_MEDIA ? [] : ICE_SERVERS,
-  iceCandidatePoolSize: E2E_MEDIA ? 0 : 4,
-};
+
+function roomIceConfig(session: RoomSession): RTCConfiguration {
+  if (E2E_MEDIA) return { iceServers: [], iceCandidatePoolSize: 0 };
+  return {
+    iceServers: buildIceServers(import.meta.env, session.iceServers ?? []),
+    iceCandidatePoolSize: 4,
+  };
+}
 
 const VIDEO_MAX_BITRATE = 10_000_000;
 const P2P_BLOCKED_MESSAGE =
@@ -70,7 +74,10 @@ const MAX_RESEATS = 6;
 
 export function useTelinhaRoom(
   session: RoomSession | null,
-  options?: { onSessionRefresh?: (next: RoomSession) => void },
+  options?: {
+    onSessionRefresh?: (next: RoomSession) => void;
+    onUpdateRequired?: () => void;
+  },
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const peerManagerRef = useRef<PeerManager | null>(null);
@@ -87,6 +94,7 @@ export function useTelinhaRoom(
   const stopShareRef = useRef<() => Promise<void>>(async () => undefined);
   const reseatCountRef = useRef(0);
   const onSessionRefresh = options?.onSessionRefresh;
+  const onUpdateRequired = options?.onUpdateRequired;
 
   const [connectionState, setConnectionState] = useState<ConnectionState>(
     ConnectionState.Disconnected,
@@ -215,7 +223,7 @@ export function useTelinhaRoom(
     const watchers = watchersRef.current;
     const peerManager = new PeerManager({
       localId,
-      configuration: ICE_CONFIG,
+      configuration: roomIceConfig(session),
       getLocalStream: () => localStreamRef.current,
       getVideoBitrate: () => shareBitrateRef.current,
       preferH264: () => preferH264Ref.current,
@@ -232,6 +240,17 @@ export function useTelinhaRoom(
           setError(P2P_BLOCKED_MESSAGE);
         }
       },
+      refreshIceServers: async () => {
+        if (E2E_MEDIA) return [];
+        try {
+          const servers = await fetchIceServers(session);
+          return buildIceServers(import.meta.env, servers);
+        } catch (err) {
+          recordDiagnostic("ice-refresh-failed", { message: errorMessage(err) });
+          return null;
+        }
+      },
+      onIceError: (details) => recordDiagnostic("ice-error", details),
       onMediaStatus: (peerId, status) => {
         recordDiagnostic("media-status", { peerId, status });
         if (status === "receiving") {
@@ -323,6 +342,7 @@ export function useTelinhaRoom(
         if (message.code === "update-required") {
           fatal = true;
           setConnectionState(ConnectionState.Disconnected);
+          onUpdateRequired?.();
         } else if (text.includes("Sala inválida")) {
           const refreshed = await refreshSeat();
           if (refreshed) {
@@ -548,6 +568,15 @@ export function useTelinhaRoom(
             transport: sample.transport,
             localIceCandidates: sample.localIceCandidates,
             remoteIceCandidates: sample.remoteIceCandidates,
+            localHostCandidates: sample.localHostCandidates,
+            localSrflxCandidates: sample.localSrflxCandidates,
+            localRelayCandidates: sample.localRelayCandidates,
+            remoteHostCandidates: sample.remoteHostCandidates,
+            remoteSrflxCandidates: sample.remoteSrflxCandidates,
+            remoteRelayCandidates: sample.remoteRelayCandidates,
+            selectedLocalType: sample.selectedLocalType,
+            selectedRemoteType: sample.selectedRemoteType,
+            iceTransportPolicy: sample.iceTransportPolicy,
           });
         }
       });
@@ -585,6 +614,7 @@ export function useTelinhaRoom(
     closePeer,
     offerTo,
     onSessionRefresh,
+    onUpdateRequired,
     publishWatchers,
     offerToEveryone,
     publishPeople,

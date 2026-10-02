@@ -16,6 +16,15 @@ export interface PeerHealthSample {
   transport?: string;
   localIceCandidates?: number;
   remoteIceCandidates?: number;
+  localHostCandidates?: number;
+  localSrflxCandidates?: number;
+  localRelayCandidates?: number;
+  remoteHostCandidates?: number;
+  remoteSrflxCandidates?: number;
+  remoteRelayCandidates?: number;
+  selectedLocalType?: string;
+  selectedRemoteType?: string;
+  iceTransportPolicy?: string;
 }
 
 export function classifyConnectionQuality(
