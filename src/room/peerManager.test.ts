@@ -99,10 +99,11 @@ describe("PeerManager", () => {
     getLocalStream: () => MediaStream | null,
     localId = "user-z",
     onMediaStatus = vi.fn(),
+    configuration: RTCConfiguration = {},
   ) {
     return new PeerManager({
       localId,
-      configuration: {},
+      configuration,
       getLocalStream,
       getVideoBitrate: () => 10_000_000,
       preferH264: () => true,
@@ -167,7 +168,9 @@ describe("PeerManager", () => {
   });
 
   it("conta candidatos por tipo e força relay no primeiro failed", async () => {
-    const peers = manager(() => null);
+    const peers = manager(() => null, "user-z", vi.fn(), {
+      iceServers: [{ urls: "turn:turn.example.com:3478", username: "user", credential: "pass" }],
+    });
     await peers.handleIce("user-a", {
       candidate: "candidate:1 1 udp 2122260223 1.2.3.4 9 typ host",
     });

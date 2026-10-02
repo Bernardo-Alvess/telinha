@@ -267,7 +267,9 @@ export class PeerManager {
       if (servers?.length) {
         this.configuration = { ...this.configuration, iceServers: servers };
       }
-      entry.connection.setConfiguration({ ...this.configuration, iceTransportPolicy: "relay" });
+      if (hasRelayServer(this.configuration)) {
+        entry.connection.setConfiguration({ ...this.configuration, iceTransportPolicy: "relay" });
+      }
       await this.offer(peerId, true);
     } catch {
       this.options.onError("Não foi possível recuperar a conexão P2P.");
@@ -388,6 +390,13 @@ export class PeerManager {
     entry.lastMediaStatus = status;
     this.options.onMediaStatus(peerId, status);
   }
+}
+
+function hasRelayServer(configuration: RTCConfiguration): boolean {
+  return (configuration.iceServers ?? []).some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"));
+  });
 }
 
 function rememberCandidate(

@@ -94,7 +94,8 @@ export function useTelinhaRoom(
   const stopShareRef = useRef<() => Promise<void>>(async () => undefined);
   const reseatCountRef = useRef(0);
   const onSessionRefresh = options?.onSessionRefresh;
-  const onUpdateRequired = options?.onUpdateRequired;
+  const onUpdateRequiredRef = useRef(options?.onUpdateRequired);
+  onUpdateRequiredRef.current = options?.onUpdateRequired;
 
   const [connectionState, setConnectionState] = useState<ConnectionState>(
     ConnectionState.Disconnected,
@@ -342,7 +343,7 @@ export function useTelinhaRoom(
         if (message.code === "update-required") {
           fatal = true;
           setConnectionState(ConnectionState.Disconnected);
-          onUpdateRequired?.();
+          onUpdateRequiredRef.current?.();
         } else if (text.includes("Sala inválida")) {
           const refreshed = await refreshSeat();
           if (refreshed) {
@@ -614,7 +615,6 @@ export function useTelinhaRoom(
     closePeer,
     offerTo,
     onSessionRefresh,
-    onUpdateRequired,
     publishWatchers,
     offerToEveryone,
     publishPeople,
