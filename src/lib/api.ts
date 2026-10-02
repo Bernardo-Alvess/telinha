@@ -6,6 +6,12 @@ import {
 
 export const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 
+export interface SessionIceServer {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+}
+
 export interface RoomSession {
   code: string;
   participantId: string;
@@ -14,6 +20,12 @@ export interface RoomSession {
   wsUrl: string;
   protocolVersion: number;
   wsAuthMode?: "message" | "query";
+  iceServers?: SessionIceServer[];
+}
+
+export interface AppConfig {
+  minAppVersion: string;
+  minProtocolVersion: number;
 }
 
 export class RoomNotFoundError extends Error {
@@ -106,7 +118,27 @@ function parseRoomSession(data: Record<string, unknown>): RoomSession {
     wsUrl,
     protocolVersion: typeof protocolVersion === "number" ? protocolVersion : 1,
     wsAuthMode: wsAuthMode === "message" ? "message" : "query",
+    iceServers: parseIceServers(data.iceServers),
   };
+}
+
+function parseIceServers(value: unknown): SessionIceServer[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const servers = value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const urls = Array.isArray(record.urls)
+      ? record.urls.filter((url): url is string => typeof url === "string" && url.length > 0)
+      : typeof record.urls === "string" && record.urls
+        ? [record.urls]
+        : [];
+    if (urls.length === 0) return [];
+    const server: SessionIceServer = { urls: urls.length === 1 ? urls[0]! : urls };
+    if (typeof record.username === "string" && record.username) server.username = record.username;
+    if (typeof record.credential === "string" && record.credential) server.credential = record.credential;
+    return [server];
+  });
+  return servers.length > 0 ? servers : undefined;
 }
 
 async function roomRequest(path: string, body: Record<string, unknown>): Promise<RoomSession> {
@@ -143,6 +175,38 @@ export async function joinRoom(code: string, displayName: string): Promise<RoomS
     protocolVersion: PROTOCOL_VERSION,
     appVersion: APP_VERSION,
   });
+}
+
+export async function fetchAppConfig(): Promise<AppConfig | null> {
+  try {
+    const response = await fetch(`${API_URL}/app-config`, { method: "GET", cache: "no-store" });
+    if (!response.ok) return null;
+    const data = await readJson(response);
+    if (typeof data.minAppVersion !== "string" || !data.minAppVersion) return null;
+    return {
+      minAppVersion: data.minAppVersion,
+      minProtocolVersion:
+        typeof data.minProtocolVersion === "number" ? data.minProtocolVersion : PROTOCOL_VERSION,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchIceServers(session: RoomSession): Promise<SessionIceServer[]> {
+  const response = await fetch(
+    `${API_URL}/rooms/${encodeURIComponent(session.code)}/ice-servers?participantId=${encodeURIComponent(session.participantId)}`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${session.token}` },
+      cache: "no-store",
+    },
+  );
+  const data = await readJson(response);
+  if (!response.ok) {
+    throw new Error(typeof data.error === "string" ? data.error : "Não foi possível renovar o TURN.");
+  }
+  return parseIceServers(data.iceServers) ?? [];
 }
 
 export async function pingHealth(): Promise<void> {

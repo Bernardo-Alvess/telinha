@@ -2,7 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ClosePrompt } from "./components/ClosePrompt";
-import { enterRoom, leaveRoomSession, type RoomSession } from "./lib/api";
+import { UpdatePrompt } from "./components/UpdatePrompt";
+import { enterRoom, fetchAppConfig, leaveRoomSession, type RoomSession } from "./lib/api";
+import { APP_VERSION } from "./lib/protocol";
+import { decideUpdate, findAvailableUpdate, installAvailableUpdate } from "./lib/updates";
 import { actionFromUrls } from "./lib/deepLink";
 import {
   clearActiveSession,
@@ -34,6 +37,10 @@ function App() {
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isSharing, setIsSharing] = useState(false);
   const [closePrompt, setClosePrompt] = useState(false);
+  const [updatePrompt, setUpdatePrompt] = useState<{ required: boolean; version: string } | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updating, setUpdating] = useState(false);
   const sessionRef = useRef(session);
 
   const adoptSession = useCallback((next: RoomSession) => {
@@ -73,6 +80,35 @@ function App() {
   useEffect(() => {
     void flushLeaves();
   }, [flushLeaves]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [config, available] = await Promise.all([fetchAppConfig(), findAvailableUpdate()]);
+      if (cancelled) return;
+      const decision = decideUpdate({
+        current: APP_VERSION,
+        minimum: config?.minAppVersion,
+        available,
+      });
+      if (!decision) return;
+      setUpdatePrompt((current) => (current?.required ? current : decision));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function runUpdate() {
+    setUpdating(true);
+    setUpdateError(null);
+    try {
+      await installAvailableUpdate(setUpdateProgress);
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : "Não foi possível atualizar.");
+      setUpdating(false);
+    }
+  }
 
   useEffect(() => {
     if (!session) return;
@@ -226,6 +262,18 @@ function App() {
     setPendingCode(invite.code);
   }
 
+  const updateDialog = updatePrompt ? (
+    <UpdatePrompt
+      required={updatePrompt.required}
+      version={updatePrompt.version}
+      progress={updateProgress}
+      error={updateError}
+      updating={updating}
+      onUpdate={() => void runUpdate()}
+      onLater={() => setUpdatePrompt(null)}
+    />
+  ) : null;
+
   const closeDialog = closePrompt ? (
     <ClosePrompt
       inRoom={Boolean(session)}
@@ -268,12 +316,14 @@ function App() {
   if (session) {
     return (
       <div className="app-shell">
+        {updateDialog}
         {closeDialog}
         {inviteBanner ? <div className="notice-overlay">{inviteBanner}</div> : null}
         <RoomScreen
           session={session}
           onLeave={() => void leaveRoom()}
           onSessionRefresh={adoptSession}
+          onUpdateRequired={() => setUpdatePrompt({ required: true, version: APP_VERSION })}
           onSharingChange={setIsSharing}
           openPicker={pendingShare}
           onPickerOpened={() => setPendingShare(false)}
@@ -284,6 +334,7 @@ function App() {
 
   return (
     <>
+      {updateDialog}
       {closeDialog}
       <HomeScreen
         onJoin={adoptSession}

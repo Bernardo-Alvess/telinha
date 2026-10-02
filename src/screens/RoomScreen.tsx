@@ -19,6 +19,7 @@ interface RoomScreenProps {
   session: RoomSession;
   onLeave: () => void;
   onSessionRefresh?: (session: RoomSession) => void;
+  onUpdateRequired?: () => void;
   onSharingChange?: (sharing: boolean) => void;
   openPicker?: boolean;
   onPickerOpened?: () => void;
@@ -35,6 +36,7 @@ export function RoomScreen({
   session,
   onLeave,
   onSessionRefresh,
+  onUpdateRequired,
   onSharingChange,
   openPicker,
   onPickerOpened,
@@ -71,7 +73,7 @@ export function RoomScreen({
     stopShare,
     setWatchingShare,
     error,
-  } = useTelinhaRoom(session, { onSessionRefresh });
+  } = useTelinhaRoom(session, { onSessionRefresh, onUpdateRequired });
 
   useEffect(() => {
     onSharingChange?.(isSharing);

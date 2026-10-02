@@ -19,6 +19,7 @@ import {
   parseClientSignal,
   readProtocolVersion,
 } from "./protocol.js";
+import { createIceServerProvider, type TurnProviderOptions } from "./turn.js";
 
 const SEAT_TTL_MS = 2 * 60 * 1000;
 const RECONNECT_GRACE_MS = 15 * 60 * 1000;
@@ -84,9 +85,11 @@ export interface TelinhaServerOptions {
   emptyRoomGraceMs?: number;
   cleanupIntervalMs?: number;
   minProtocolVersion?: number;
+  minAppVersion?: string;
   corsOrigins?: string[];
   maxRateBuckets?: number;
   authenticationTimeoutMs?: number;
+  turn?: TurnProviderOptions;
 }
 
 export interface TelinhaServer {
@@ -143,6 +146,8 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
   const emptyRoomGraceMs = options.emptyRoomGraceMs ?? EMPTY_ROOM_GRACE_MS;
   const cleanupIntervalMs = options.cleanupIntervalMs ?? 5_000;
   const minProtocolVersion = options.minProtocolVersion ?? CURRENT_PROTOCOL_VERSION;
+  const minAppVersion = options.minAppVersion?.trim() || "0.2.0";
+  const iceServers = createIceServerProvider(options.turn);
   const maxRateBuckets = Math.max(1, options.maxRateBuckets ?? MAX_RATE_BUCKETS);
   const authenticationTimeoutMs =
     options.authenticationTimeoutMs ?? AUTHENTICATION_TIMEOUT_MS;
@@ -325,7 +330,7 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     return `${wsProto}://${host}/ws`;
   }
 
-  function sessionPayload(req: express.Request, code: string, seat: Seat, displayName: string) {
+  async function sessionPayload(req: express.Request, code: string, seat: Seat, displayName: string) {
     return {
       code,
       participantId: seat.id,
@@ -333,8 +338,22 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
       displayName,
       wsUrl: wsUrlFromRequest(req),
       protocolVersion: CURRENT_PROTOCOL_VERSION,
-      wsAuthMode: "message",
+      wsAuthMode: "message" as const,
+      iceServers: await iceServers.getIceServers(),
     };
+  }
+
+  function bearerToken(req: express.Request): string {
+    const [scheme, token = ""] = (req.header("authorization") ?? "").split(/\s+/, 2);
+    return scheme.toLowerCase() === "bearer" ? token : "";
+  }
+
+  function findIdentity(room: Room, participantId: string) {
+    return (
+      room.participants.get(participantId) ??
+      room.holds.get(participantId) ??
+      room.seats.get(participantId)
+    );
   }
 
   function clientIp(req: express.Request): string {
@@ -406,7 +425,11 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     res.json({ ok: true, service: "telinha-server" });
   });
 
-  app.post("/rooms", requireProtocol, rateLimited(createHits, CREATE_LIMIT), (req, res) => {
+  app.get("/app-config", (_req, res) => {
+    res.json({ minAppVersion, minProtocolVersion });
+  });
+
+  app.post("/rooms", requireProtocol, rateLimited(createHits, CREATE_LIMIT), async (req, res) => {
     const displayName = sanitizeDisplayName(req.body?.displayName);
     if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "code")) {
       res.status(400).json({ error: "Código personalizado não é suportado." });
@@ -417,10 +440,10 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     const room = createEmptyRoom();
     const seat = issueSeat(room, displayName);
     rooms.set(code, room);
-    res.json(sessionPayload(req, code, seat, displayName));
+    res.json(await sessionPayload(req, code, seat, displayName));
   });
 
-  app.post("/rooms/:code/join", requireProtocol, rateLimited(joinHits, JOIN_LIMIT), (req, res) => {
+  app.post("/rooms/:code/join", requireProtocol, rateLimited(joinHits, JOIN_LIMIT), async (req, res) => {
     const rawCode = req.params.code;
     const code = normalizeRoomCode(Array.isArray(rawCode) ? rawCode[0] ?? "" : rawCode ?? "");
     if (!isValidRoomCode(code)) {
@@ -441,7 +464,21 @@ export function createTelinhaServer(options: TelinhaServerOptions = {}): Telinha
     const displayName = sanitizeDisplayName(req.body?.displayName);
     const seat = issueSeat(room, displayName);
     room.emptiedAt = null;
-    res.json(sessionPayload(req, code, seat, displayName));
+    res.json(await sessionPayload(req, code, seat, displayName));
+  });
+
+  app.get("/rooms/:code/ice-servers", async (req, res) => {
+    const rawCode = req.params.code;
+    const code = normalizeRoomCode(Array.isArray(rawCode) ? rawCode[0] ?? "" : rawCode ?? "");
+    const participantId = typeof req.query.participantId === "string" ? req.query.participantId : "";
+    const token = bearerToken(req);
+    const room = isValidRoomCode(code) ? rooms.get(code) : undefined;
+    const identity = room && participantId ? findIdentity(room, participantId) : undefined;
+    if (!room || !identity || !token || !tokensEqual(identity.token, token)) {
+      res.status(403).json({ error: "Token de participante inválido." });
+      return;
+    }
+    res.json({ iceServers: await iceServers.getIceServers() });
   });
 
   app.delete("/rooms/:code/participants/:participantId", (req, res) => {

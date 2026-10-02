@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import WebSocket from "ws";
 import { createTelinhaServer, type TelinhaServer } from "./app.js";
@@ -519,5 +519,54 @@ describe("telinha server", () => {
     expect(hello.you?.sharing).toBe(true);
     again.close();
 
+  });
+
+  it("publica a versão mínima do app", async () => {
+    const server = createTelinhaServer({ disableRateLimit: true, minAppVersion: "0.3.0" });
+    running = server;
+    await new Promise<void>((resolve) => {
+      server.http.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.http.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${address.port}/app-config`);
+    await expect(response.json()).resolves.toEqual({ minAppVersion: "0.3.0", minProtocolVersion: 2 });
+  });
+
+  it("entrega os iceServers da sessão e renova com o token do participante", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          iceServers: [{ urls: "turn:turn.example.com:3478", username: "user", credential: "secret" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const server = createTelinhaServer({
+      disableRateLimit: true,
+      turn: { keyId: "key", apiToken: "token", fetchImpl },
+    });
+    running = server;
+    await new Promise<void>((resolve) => {
+      server.http.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.http.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const created = await postJson(`${base}/rooms`, { displayName: "Ana" });
+    const session = created.data as unknown as RoomSession & { iceServers?: { username?: string }[] };
+    expect(session.iceServers?.some((server) => server.username === "user")).toBe(true);
+
+    const denied = await fetch(
+      `${base}/rooms/${session.code}/ice-servers?participantId=${session.participantId}`,
+    );
+    expect(denied.status).toBe(403);
+
+    const renewed = await fetch(
+      `${base}/rooms/${session.code}/ice-servers?participantId=${encodeURIComponent(session.participantId)}`,
+      { headers: { Authorization: `Bearer ${session.token}` } },
+    );
+    const body = (await renewed.json()) as { iceServers?: { username?: string }[] };
+    expect(renewed.status).toBe(200);
+    expect(body.iceServers?.some((server) => server.username === "user")).toBe(true);
   });
 });

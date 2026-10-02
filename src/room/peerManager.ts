@@ -17,6 +17,8 @@ interface PeerEntry {
   lastMediaStatus?: MediaDeliveryStatus;
   localIceCandidates: number;
   remoteIceCandidates: number;
+  localCandidateTypes: Record<string, number>;
+  remoteCandidateTypes: Record<string, number>;
 }
 
 export type MediaDeliveryStatus =
@@ -36,6 +38,8 @@ interface PeerManagerOptions {
   onRemoteStream: (peerId: string, stream: MediaStream) => void;
   onConnectionState: (peerId: string, state: RTCPeerConnectionState) => void;
   onMediaStatus: (peerId: string, status: MediaDeliveryStatus) => void;
+  onIceError?: (details: { errorCode: number; errorText: string; iceUrl: string }) => void;
+  refreshIceServers?: () => Promise<RTCIceServer[] | null | undefined>;
   onError: (message: string) => void;
 }
 
@@ -47,8 +51,11 @@ interface PreviousBytes {
 export class PeerManager {
   private readonly peers = new Map<string, PeerEntry>();
   private readonly previousBytes = new Map<string, PreviousBytes>();
+  private configuration: RTCConfiguration;
 
-  constructor(private readonly options: PeerManagerOptions) {}
+  constructor(private readonly options: PeerManagerOptions) {
+    this.configuration = options.configuration;
+  }
 
   async offer(peerId: string, iceRestart = false): Promise<void> {
     const entry = this.ensure(peerId);
@@ -100,12 +107,14 @@ export class PeerManager {
       const pending = entry ?? this.ensure(peerId);
       pending.pendingIce.push(candidate);
       pending.remoteIceCandidates += 1;
+      rememberCandidate(pending.remoteCandidateTypes, candidate);
       return;
     }
     if (entry.ignoreOffer) return;
     try {
       await entry.connection.addIceCandidate(candidate);
       entry.remoteIceCandidates += 1;
+      rememberCandidate(entry.remoteCandidateTypes, candidate);
     } catch {
       if (!entry.ignoreOffer) this.options.onError("Falha ao aplicar candidato de rede.");
     }
@@ -128,6 +137,7 @@ export class PeerManager {
     const entry = this.peers.get(peerId);
     if (!entry) return;
     entry.connection.onicecandidate = null;
+    entry.connection.onicecandidateerror = null;
     entry.connection.ontrack = null;
     entry.connection.onconnectionstatechange = null;
     entry.connection.close();
@@ -159,6 +169,13 @@ export class PeerManager {
         sample.connectionState = entry.connection.connectionState;
         sample.localIceCandidates = entry.localIceCandidates;
         sample.remoteIceCandidates = entry.remoteIceCandidates;
+        sample.localHostCandidates = entry.localCandidateTypes.host ?? 0;
+        sample.localSrflxCandidates = entry.localCandidateTypes.srflx ?? 0;
+        sample.localRelayCandidates = entry.localCandidateTypes.relay ?? 0;
+        sample.remoteHostCandidates = entry.remoteCandidateTypes.host ?? 0;
+        sample.remoteSrflxCandidates = entry.remoteCandidateTypes.srflx ?? 0;
+        sample.remoteRelayCandidates = entry.remoteCandidateTypes.relay ?? 0;
+        sample.iceTransportPolicy = entry.connection.getConfiguration?.().iceTransportPolicy ?? "all";
         this.evaluateMedia(peerId, entry, sample);
         return sample;
       }),
@@ -171,13 +188,13 @@ export class PeerManager {
     if (
       current &&
       current.connection.connectionState !== "closed" &&
-      current.connection.connectionState !== "failed"
+      (current.connection.connectionState !== "failed" || current.iceRestarted)
     ) {
       return current;
     }
     if (current) this.close(peerId);
 
-    const connection = new RTCPeerConnection(this.options.configuration);
+    const connection = new RTCPeerConnection(this.configuration);
     const entry: PeerEntry = {
       connection,
       pendingIce: [],
@@ -189,14 +206,24 @@ export class PeerManager {
       forceVp8: false,
       localIceCandidates: 0,
       remoteIceCandidates: 0,
+      localCandidateTypes: {},
+      remoteCandidateTypes: {},
     };
     this.peers.set(peerId, entry);
 
     connection.onicecandidate = (event) => {
       if (event.candidate) {
         entry.localIceCandidates += 1;
+        rememberCandidate(entry.localCandidateTypes, event.candidate);
         this.options.send({ type: "ice", to: peerId, candidate: event.candidate.toJSON() });
       }
+    };
+    connection.onicecandidateerror = (event) => {
+      this.options.onIceError?.({
+        errorCode: event.errorCode,
+        errorText: event.errorText,
+        iceUrl: event.url,
+      });
     };
     connection.onconnectionstatechange = () => {
       this.options.onConnectionState(peerId, connection.connectionState);
@@ -208,9 +235,7 @@ export class PeerManager {
         connection.signalingState !== "closed"
       ) {
         entry.iceRestarted = true;
-        void this.offer(peerId, true).catch(() => {
-          this.options.onError("Não foi possível recuperar a conexão P2P.");
-        });
+        void this.recover(peerId, entry);
       }
     };
     connection.ontrack = (event) => {
@@ -234,6 +259,21 @@ export class PeerManager {
       if (!peer.getSenders().some((sender) => sender.track === track)) peer.addTrack(track, stream);
     }
     preferVideoCodecs(peer, forceVp8 ? false : this.options.preferH264());
+  }
+
+  private async recover(peerId: string, entry: PeerEntry): Promise<void> {
+    try {
+      const servers = await this.options.refreshIceServers?.();
+      if (servers?.length) {
+        this.configuration = { ...this.configuration, iceServers: servers };
+      }
+      if (hasRelayServer(this.configuration)) {
+        entry.connection.setConfiguration({ ...this.configuration, iceTransportPolicy: "relay" });
+      }
+      await this.offer(peerId, true);
+    } catch {
+      this.options.onError("Não foi possível recuperar a conexão P2P.");
+    }
   }
 
   private async flushIce(entry: PeerEntry): Promise<void> {
@@ -280,6 +320,8 @@ export class PeerManager {
         const remoteCandidate =
           typeof report.remoteCandidateId === "string" ? reports.get(report.remoteCandidateId) : null;
         const candidate = localCandidate ?? remoteCandidate;
+        if (localCandidate?.candidateType) sample.selectedLocalType = String(localCandidate.candidateType);
+        if (remoteCandidate?.candidateType) sample.selectedRemoteType = String(remoteCandidate.candidateType);
         if (candidate?.candidateType) sample.candidateType = String(candidate.candidateType);
         if (candidate?.protocol) sample.transport = String(candidate.protocol);
       }
@@ -348,6 +390,30 @@ export class PeerManager {
     entry.lastMediaStatus = status;
     this.options.onMediaStatus(peerId, status);
   }
+}
+
+function hasRelayServer(configuration: RTCConfiguration): boolean {
+  return (configuration.iceServers ?? []).some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"));
+  });
+}
+
+function rememberCandidate(
+  counts: Record<string, number>,
+  candidate: RTCIceCandidate | RTCIceCandidateInit,
+): void {
+  const type = iceCandidateType(candidate);
+  counts[type] = (counts[type] ?? 0) + 1;
+}
+
+function iceCandidateType(candidate: RTCIceCandidate | RTCIceCandidateInit): string {
+  if ("type" in candidate && typeof candidate.type === "string" && candidate.type) {
+    return candidate.type;
+  }
+  const raw = candidate.candidate;
+  const match = typeof raw === "string" ? raw.match(/\styp\s([a-z0-9]+)/i) : null;
+  return match?.[1]?.toLowerCase() ?? "unknown";
 }
 
 function markVideoMotion(track: MediaStreamTrack | null): void {

@@ -25,7 +25,7 @@ describe("diagnóstico local", () => {
   it("gera relatório local versionado", () => {
     recordDiagnostic("peer-state", { state: "connected" });
     const report = JSON.parse(buildDiagnostics()) as Record<string, unknown>;
-    expect(report).toMatchObject({ appVersion: "0.2.0", protocolVersion: 2 });
+    expect(report).toMatchObject({ appVersion: "0.3.0", protocolVersion: 2 });
     expect(report.events).toEqual(expect.arrayContaining([expect.objectContaining({ event: "peer-state" })]));
   });
 });

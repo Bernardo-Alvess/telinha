@@ -1,7 +1,7 @@
 {
   "name": "telinha-server",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Servidor de salas e sinalização WebSocket do Telinha.",
   "author": "llorenzocardoso",
   "license": "MIT",
@@ -15,7 +15,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
+    "start": "node scripts/start.mjs",
     "build": "tsc",
     "test": "vitest run",
     "lint": "eslint src"

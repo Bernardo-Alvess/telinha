@@ -20,12 +20,19 @@ const corsOrigins = process.env.CORS_ORIGINS
   ?.split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const turnTtl = Number(process.env.CLOUDFLARE_TURN_TTL_SECONDS);
 
 const server = createTelinhaServer({
   publicWsUrl: process.env.WS_PUBLIC_URL,
   trustProxy: Boolean(process.env.RENDER || process.env.TRUST_PROXY === "1"),
   minProtocolVersion,
+  minAppVersion: process.env.MIN_APP_VERSION,
   corsOrigins,
+  turn: {
+    keyId: process.env.CLOUDFLARE_TURN_KEY_ID,
+    apiToken: process.env.CLOUDFLARE_TURN_API_TOKEN,
+    ttlSeconds: Number.isFinite(turnTtl) ? turnTtl : undefined,
+  },
 });
 
 server.http.listen(PORT, HOST, () => {

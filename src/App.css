@@ -2137,6 +2137,38 @@ button:focus-visible {
   }
 }
 
+.update-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(5, 6, 10, 0.72);
+}
+
+.update-prompt {
+  width: min(420px, 100%);
+}
+
+.update-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--canvas);
+}
+
+.update-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.update-error {
+  color: var(--danger);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
