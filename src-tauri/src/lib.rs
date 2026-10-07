@@ -23,6 +23,7 @@ fn copy_to_clipboard(text: String, app: tauri::AppHandle) -> Result<(), String> 
 #[tauri::command]
 fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
         window.show().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
     }
@@ -120,6 +121,7 @@ pub fn run() {
                 let _ = app.emit("telinha-open-url", urls);
             }
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -170,6 +172,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -205,6 +208,7 @@ pub fn run() {
                     {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -223,6 +227,7 @@ pub fn run() {
                         event.urls().iter().map(|url| url.to_string()).collect();
                     let _ = handle.emit("telinha-open-url", urls);
                     if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.unminimize();
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
