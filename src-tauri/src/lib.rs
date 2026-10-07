@@ -179,6 +179,7 @@ pub fn run() {
                     }
                     "start-live" => {
                         if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
