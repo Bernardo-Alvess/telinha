@@ -7,14 +7,14 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 ## Goals
 
 - [ ] A partir da tray, o usuário chega ao seletor de tela em um clique, criando a sala se ainda não estiver em uma.
-- [ ] Ao confirmar a tela, o link `telinha://join/CODE` da sala atual está na área de transferência e o usuário é avisado por um toast dentro do app.
+- [ ] Ao confirmar a tela, o link `<API_URL>/j/CODE` da sala atual está na área de transferência e o usuário é avisado por um toast dentro do app.
 - [ ] Com uma sala ativa, a tray permite copiar o link ou o código e parar a live, sem abrir a janela.
 
 ## Out of Scope
 
 | Feature | Reason |
 | --- | --- |
-| Link https / página de redirecionamento | Quem recebe já tem o Telinha instalado |
+| Download direto do instalador | A página de convite só aponta para a release mais recente do GitHub |
 | `?name=` no link copiado | Decidido: o parser usa `name` para definir o nome de quem entra, o que confundiria o convidado |
 | Popup/janela flutuante ancorada na tray | Menu nativo atende; fica como evolução |
 | Toast nativo do Windows, troca do ícone da tray, tooltip dinâmico | Decidido: feedback só por toast dentro do app |
@@ -30,7 +30,7 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 | Assumption / decision | Chosen default | Rationale | Confirmed? |
 | --- | --- | --- | --- |
 | Quem cria a sala pela tray | O frontend, usando `createRoom` e o nome salvo (`telinha-display-name`, padrão "Amigo") | A criação e a sessão vivem no frontend; a tray só emite evento | y |
-| Link copiado | `telinha://join/CODE`, sem query string | Decisão do usuário | y |
+| Link copiado | `<API_URL>/j/CODE` (URL pública do servidor, a mesma `VITE_API_URL` do app), sem query string. O servidor serve uma página que abre `telinha://join/CODE` e tem o link para a release mais recente | Decisão do usuário: `telinha://` não vira link clicável em chats; https sim | y |
 | Quando o link é copiado no fluxo "Iniciar live" | Só depois que a live começa de fato (após `startShare` concluir) | Decisão do usuário: "copiar quando a live começa" | y |
 | Feedback | Toast dentro do app | Decisão do usuário | y |
 | Janela ao usar "Copiar link" / "Copiar código" da tray | A janela **não** é mostrada; a cópia acontece e o toast só é visível se a janela já estiver visível | Esses itens existem para uso rápido sem abrir o app; sem toast nativo não há outro feedback | n |
@@ -56,13 +56,13 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 1. WHEN o usuário clica em "Iniciar live" e não há sala ativa THEN system SHALL criar uma sala com o nome salvo, entrar nela e abrir o seletor de tela.
 2. WHEN o usuário clica em "Iniciar live" e há sala ativa THEN system SHALL manter essa sala, sem criar outra, e abrir o seletor de tela.
 3. WHEN o usuário clica em "Iniciar live" THEN system SHALL mostrar e focar a janela principal, mesmo que estivesse escondida.
-4. WHEN o usuário confirma uma fonte no seletor e a live começa THEN system SHALL copiar `telinha://join/CODE` (CODE = código da sala atual, sem `?name=`) para a área de transferência.
+4. WHEN o usuário confirma uma fonte no seletor e a live começa THEN system SHALL copiar `<API_URL>/j/CODE` (CODE = código da sala atual, sem `?name=`) para a área de transferência.
 5. WHEN o link é copiado ao iniciar a live THEN system SHALL mostrar um toast dentro do app informando que o link foi copiado.
 6. WHEN o usuário cancela ou fecha o seletor sem escolher uma fonte THEN system SHALL manter a sala aberta, não copiar nada e não mostrar toast de cópia.
 7. WHEN a criação da sala falha THEN system SHALL manter o usuário na tela inicial exibindo a mensagem de erro já usada para falha de criação de sala, e não abrir o seletor.
 8. WHEN "Iniciar live" é acionado enquanto uma criação de sala disparada pela tray ainda está em andamento THEN system SHALL ignorar o acionamento extra, sem criar uma segunda sala.
 
-**Independent Test**: Sem sala ativa, clicar em "Iniciar live" na tray, escolher uma tela, e colar: o texto colado é `telinha://join/<código da sala exibida>`; o toast apareceu.
+**Independent Test**: Sem sala ativa, clicar em "Iniciar live" na tray, escolher uma tela, e colar: o texto colado é `<API_URL>/j/<código da sala exibida>`; o toast apareceu.
 
 ---
 
@@ -94,13 +94,13 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 
 **Acceptance Criteria**:
 
-1. WHEN o usuário clica em "Copiar link" THEN system SHALL copiar `telinha://join/CODE` da sala atual, sem `?name=`.
+1. WHEN o usuário clica em "Copiar link" THEN system SHALL copiar `<API_URL>/j/CODE` da sala atual, sem `?name=`.
 2. WHEN o usuário clica em "Copiar código" THEN system SHALL copiar somente o CODE da sala atual (6 caracteres, como exibido na sala).
 3. WHEN "Copiar link" ou "Copiar código" é acionado THEN system SHALL registrar um toast de confirmação, e SHALL NOT mostrar nem focar a janela.
 4. WHEN o clipboard falha nos dois mecanismos THEN system SHALL mostrar um toast de erro de cópia e não alterar o estado da sala.
 5. WHEN o código muda porque a sessão foi renovada ou o usuário trocou de sala THEN system SHALL copiar o código da sala atual no momento do clique, nunca um valor antigo.
 
-**Independent Test**: Em uma sala, clicar em "Copiar link", colar e conferir `telinha://join/<código>`; repetir com "Copiar código" e conferir só o código.
+**Independent Test**: Em uma sala, clicar em "Copiar link", colar e conferir `<API_URL>/j/<código>`; repetir com "Copiar código" e conferir só o código.
 
 ---
 
@@ -116,6 +116,22 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 2. WHEN a live para pela tray THEN system SHALL aplicar o AC 4 de "Menu da tray conforme o estado".
 
 **Independent Test**: Durante uma live, clicar em "Parar live" na tray: os espectadores deixam de receber a tela, a sala continua, e o menu volta a mostrar "Iniciar live".
+
+---
+
+### P1: Página de convite no servidor ⭐ MVP
+
+**User Story**: Como convidado que já tem o Telinha, quero clicar no link recebido e cair direto na sala.
+
+**Why P1**: Sem ela o link https copiado não abriria o app.
+
+**Acceptance Criteria**:
+
+1. WHEN `GET /j/CODE` recebe um código válido (6 caracteres do alfabeto de salas, normalizado como nas outras rotas) THEN server SHALL responder 200 `text/html` com um link e um redirecionamento automático para `telinha://join/CODE`.
+2. WHEN a página é exibida THEN server SHALL incluir um link para `https://github.com/llorenzocardoso/telinha/releases/latest`.
+3. WHEN o código é inválido THEN server SHALL responder 404 sem incluir `telinha://join` no corpo.
+
+**Independent Test**: Abrir `<API_URL>/j/<código>` no navegador e ver o Telinha abrir na tela de convite.
 
 ---
 
@@ -150,8 +166,9 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 | TRAYLIVE-15 | P1: Copiar — falha de clipboard (AC 4) | Specify | Pending |
 | TRAYLIVE-16 | P2: Parar live pela tray | Specify | Pending |
 | TRAYLIVE-17 | Edge: já compartilhando, atualização obrigatória | Specify | Pending |
+| TRAYLIVE-18 | P1: Página de convite `/j/CODE` (AC 1-3) | Specify | Pending |
 
-**Coverage:** 17 total, 0 mapped to tasks, 17 unmapped ⚠️ (esperado nesta fase)
+**Coverage:** 18 total, 0 mapped to tasks, 18 unmapped ⚠️ (esperado nesta fase)
 
 ---
 
@@ -174,6 +191,6 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 ## Success Criteria
 
 - [ ] Sem sala, do clique em "Iniciar live" até a live no ar são só 2 interações: clicar na tray e escolher a tela.
-- [ ] O texto na área de transferência após iniciar a live é exatamente `telinha://join/<código da sala atual>`.
+- [ ] O texto na área de transferência após iniciar a live é exatamente `<API_URL>/j/<código da sala atual>`.
 - [ ] O menu da tray nunca mostra "Iniciar live" durante uma live nem "Parar live" fora dela.
 - [ ] Nenhum teste existente (`npm test`) quebra e "Mostrar Telinha" / "Sair" seguem funcionando.
