@@ -344,7 +344,7 @@ export function RoomScreen({
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
     const handlers: Array<[string, () => void]> = [
-      ["tray-copy-link", () => void copyWithToastRef.current(inviteLink(codeRef.current), "Link copiado")],
+      ["tray-copy-link", () => void copyWithToastRef.current(inviteLink(codeRef.current), "Link de compartilhamento copiado")],
       ["tray-copy-code", () => void copyWithToastRef.current(codeRef.current, "Código copiado")],
       [
         "tray-stop-live",
@@ -434,7 +434,7 @@ export function RoomScreen({
         onCancel={() => setPickerOpen(false)}
         onShare={async (sourceId, quality) => {
           await startShare(sourceId, quality);
-          await copyWithToast(inviteLink(session.code), "Link copiado");
+          await copyWithToast(inviteLink(session.code), "Link de compartilhamento copiado");
           setPickerOpen(false);
         }}
       />
