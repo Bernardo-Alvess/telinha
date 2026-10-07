@@ -31,7 +31,7 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 | --- | --- | --- | --- |
 | Quem cria a sala pela tray | O frontend, usando `createRoom` e o nome salvo (`telinha-display-name`, padrão "Amigo") | A criação e a sessão vivem no frontend; a tray só emite evento | y |
 | Link copiado | `<API_URL>/j/CODE` (URL pública do servidor, a mesma `VITE_API_URL` do app), sem query string. O servidor serve uma página que abre `telinha://join/CODE` e tem o link para a release mais recente | Decisão do usuário: `telinha://` não vira link clicável em chats; https sim | y |
-| Quando o link é copiado no fluxo "Iniciar live" | Só depois que a live começa de fato (após `startShare` concluir) | Decisão do usuário: "copiar quando a live começa" | y |
+| Quando o link é copiado | Sempre que uma live começa de fato (após `startShare` concluir), por qualquer caminho: tray, botão da sala ou Ctrl+Shift+S | Decisão do usuário: "em qualquer início de live" | y |
 | Feedback | Toast dentro do app | Decisão do usuário | y |
 | Janela ao usar "Copiar link" / "Copiar código" da tray | A janela **não** é mostrada; a cópia acontece e o toast só é visível se a janela já estiver visível | Esses itens existem para uso rápido sem abrir o app; sem toast nativo não há outro feedback | n |
 | Janela ao usar "Iniciar live" ou "Parar live" | "Iniciar live" mostra e foca a janela; "Parar live" não mostra a janela | Iniciar exige o seletor visível; parar é uma ação rápida | n |
@@ -56,7 +56,7 @@ Hoje, para começar uma live é preciso abrir a janela, criar ou entrar numa sal
 1. WHEN o usuário clica em "Iniciar live" e não há sala ativa THEN system SHALL criar uma sala com o nome salvo, entrar nela e abrir o seletor de tela.
 2. WHEN o usuário clica em "Iniciar live" e há sala ativa THEN system SHALL manter essa sala, sem criar outra, e abrir o seletor de tela.
 3. WHEN o usuário clica em "Iniciar live" THEN system SHALL mostrar e focar a janela principal, mesmo que estivesse escondida.
-4. WHEN o usuário confirma uma fonte no seletor e a live começa THEN system SHALL copiar `<API_URL>/j/CODE` (CODE = código da sala atual, sem `?name=`) para a área de transferência.
+4. WHEN o usuário confirma uma fonte no seletor e a live começa (pela tray, pelo botão da sala ou pelo atalho) THEN system SHALL copiar `<API_URL>/j/CODE` (CODE = código da sala atual, sem `?name=`) para a área de transferência.
 5. WHEN o link é copiado ao iniciar a live THEN system SHALL mostrar um toast dentro do app informando que o link foi copiado.
 6. WHEN o usuário cancela ou fecha o seletor sem escolher uma fonte THEN system SHALL manter a sala aberta, não copiar nada e não mostrar toast de cópia.
 7. WHEN a criação da sala falha THEN system SHALL manter o usuário na tela inicial exibindo a mensagem de erro já usada para falha de criação de sala, e não abrir o seletor.

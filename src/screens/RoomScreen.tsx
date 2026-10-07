@@ -64,7 +64,6 @@ export function RoomScreen({
   const knownLives = useRef<Map<string, string>>(new Map());
   const toastSeq = useRef(0);
   const hideTimer = useRef<number | null>(null);
-  const trayStartRef = useRef(false);
   const codeRef = useRef(session.code);
   const isSharingRef = useRef(false);
   const stopShareRef = useRef<() => Promise<void>>(async () => undefined);
@@ -116,14 +115,9 @@ export function RoomScreen({
   });
 
   useEffect(() => {
-    if (!pickerOpen) trayStartRef.current = false;
-  }, [pickerOpen]);
-
-  useEffect(() => {
     if (trayStartRequest) {
       onTrayStartHandled?.();
       if (isSharingRef.current) return;
-      trayStartRef.current = true;
       setPickerOpen(true);
     }
   }, [trayStartRequest, onTrayStartHandled]);
@@ -439,11 +433,8 @@ export function RoomScreen({
       <ScreenSharePicker
         onCancel={() => setPickerOpen(false)}
         onShare={async (sourceId, quality) => {
-          const fromTray = trayStartRef.current;
           await startShare(sourceId, quality);
-          if (fromTray) {
-            await copyWithToast(inviteLink(session.code), "Link copiado");
-          }
+          await copyWithToast(inviteLink(session.code), "Link copiado");
           setPickerOpen(false);
         }}
       />
